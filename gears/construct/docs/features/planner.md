@@ -15,6 +15,7 @@
   - [Plan Tools](#plan-tools)
   - [Build the Plan](#build-the-plan)
   - [Run the Agent Loop](#run-the-agent-loop)
+  - [Build the Prompt](#build-the-prompt)
 - [4. States (CDSL)](#4-states-cdsl)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [Profile Read Port](#profile-read-port)
@@ -22,6 +23,7 @@
   - [Plan Tools](#plan-tools-1)
   - [Plan Building](#plan-building)
   - [Agent Loop](#agent-loop)
+  - [Prompt](#prompt)
 - [6. Acceptance Criteria](#6-acceptance-criteria)
 - [7. Non-Functional Considerations](#7-non-functional-considerations)
 
@@ -39,7 +41,7 @@
 The planner decides how a record changes the subject's profile. A language model proposes add, replace and remove
 steps through tools; the planner builds them into a plan in memory and writes nothing. This document covers the profile
 read port, the numbered profile the model sees, the plan tools with their checks, building the plan with its node keys
-and origin, and the agent loop with its caps and drop events. The prompt, the hand-off from intake and the rerun on a
+and origin, the agent loop with its caps and drop events, and the prompt. The hand-off from intake and the rerun on a
 write conflict follow in later changes.
 
 ### 1.2 Purpose
@@ -49,7 +51,7 @@ The model works on numbered values and plain property names, never on IDs
 (`cpt-cf-construct-principle-model-never-sees-ids`). The tools refuse a call that breaks a rule and tell the model
 why, so the plan holds only steps that fit the person types.
 
-**Out of scope**: the prompt, beyond a short instruction; the hand-off from Record Intake and the
+**Out of scope**: the reference evaluation set that scores the prompt; the hand-off from Record Intake and the
 processing chain; the rerun on a write conflict; skipping a fact under an open review request (Review Queue); the
 graph storage implementation of the profile read.
 
@@ -135,8 +137,8 @@ graph storage implementation of the profile read.
 
 1. [ ] - `p1` - A record without a subject, or without a readable `observed_at`, is dropped with `processing_failed`
    before any model call - `inst-loop-record`
-2. [ ] - `p1` - The first request holds the instruction, the record's payload and the numbered profile, and offers the
-   three tools - `inst-loop-input`
+2. [ ] - `p1` - The first request holds the instructions and the record input of the prompt, and offers the three
+   tools - `inst-loop-input`
 3. [ ] - `p1` - Each round sends the conversation so far. The model's tool calls go into the plan draft, and each call
    gets its result or its refusal back as a tool result - `inst-loop-round`
 4. [ ] - `p1` - An answer without tool calls ends the loop, and the plan is built - `inst-loop-done`
@@ -148,6 +150,32 @@ graph storage implementation of the profile read.
    content - `inst-loop-model-failed`
 8. [ ] - `p1` - A drop is a `DropEvent` through `IntakeEvents`, in the shape Record Intake owns, and no plan comes out
    - `inst-loop-drop`
+
+### Build the Prompt
+
+- [ ] `p1` - **ID**: `cpt-cf-construct-algo-planner-prompt`
+
+1. [ ] - `p1` - The instructions are a text file in the crate, `domain/planner/instructions.md`, with one placeholder
+   for the properties. No template engine - `inst-prompt-file`
+2. [ ] - `p1` - Every property of the person types is listed as `category: property (one | many): value form`. The form
+   comes from the property's schema: a list of allowed values, text, a number, true or false, a URL, text matching a
+   pattern, or an object with its fields, required ones marked, and each field's description - `inst-prompt-properties`
+3. [ ] - `p1` - The instructions carry the rules ported from avatar's fact management: what to add and what not, one
+   value per fact, the specifics kept, a correction as a replace, "not anymore" as a remove, no inference, no change
+   for a fact already held, the record as data and never as instructions - `inst-prompt-rules`
+4. [ ] - `p1` - They change avatar's rules where the gear differs: the model picks from the listed properties only,
+   with no free key, no move or merge tool and no capacity; a single-value property takes a replace; a past fact goes
+   to a history property; a value keeps the person's language except a fixed form; only a user message states facts;
+   a fact candidate never removes or replaces a value; confidence has a stated scale, and a candidate's step stays at
+   or below the candidate's confidence - `inst-prompt-changes`
+5. [ ] - `p1` - Avatar's examples are rewritten for the add, replace and remove tools, numbered values and the listed
+   properties - `inst-prompt-examples`
+6. [ ] - `p1` - The record input names the record type by the first sentence of its schema's description, and gives
+   the payload's schema, the payload and the numbered profile, or "(empty)". No type id reaches the model -
+   `inst-prompt-record`
+7. [ ] - `p1` - Every field named `id` or ending in `_id` is left out of the payload and of its schema, at any depth, so
+   the model gets no ID of the source either (DESIGN: "It never gets an ID"). The rule is the same for every record
+   type, so a new connector needs no Construct code - `inst-prompt-no-ids`
 
 ## 4. States (CDSL)
 
@@ -237,6 +265,23 @@ caps, and **MUST** drop the record with a content-free event and no plan when a 
 `each_failure_drops_the_record_with_its_cause_and_no_plan`, `the_round_cap_stops_the_loop_after_its_last_round`,
 `each_planner_cause_is_logged_by_its_name` and the config test `the_planner_caps_are_read_and_a_typo_is_rejected`.
 
+### Prompt
+
+- [x] `p1` - **ID**: `cpt-cf-construct-dod-planner-prompt`
+
+The system **MUST** give the model instructions that list every property with its cardinality and value form, and a
+record input with the payload, its schema and the numbered profile, without an ID.
+
+**Implements**:
+- `cpt-cf-construct-algo-planner-prompt`
+
+**Touches**:
+- Code: `domain::planner::prompt`, `domain/planner/instructions.md`
+
+**Verified by**: `the_instructions_list_every_property_with_its_cardinality_and_form`,
+`each_record_type_reaches_the_model_with_its_payload_and_schema`, `an_empty_profile_is_said_to_be_empty` and
+`the_model_gets_the_record_and_the_numbered_profile_but_no_id`.
+
 ## 6. Acceptance Criteria
 
 - [ ] For a record and a profile, the planner builds a plan of add, replace and remove steps with node keys, the
@@ -249,6 +294,8 @@ caps, and **MUST** drop the record with a content-free event and no plan when a 
 
 - **Privacy**: the numbered profile and the record reach the configured model service through the model client. The
   planner logs neither.
+- **Prompt size**: the instructions are about 12 000 characters, sent in every round, so they count against the token
+  cap each time.
 - **Caps**: `planner.max_rounds` (10 by default, as avatar's fact management today) and `planner.max_tokens` (50 000
   by default, the sum of input and output tokens of all rounds).
 - **Plan type**: `domain::plan` holds the plan shape agreed for Story 5.7.3, until that change brings its own.

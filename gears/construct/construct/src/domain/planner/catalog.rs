@@ -15,6 +15,11 @@ pub struct PropertySpec {
 }
 
 impl PropertySpec {
+    #[must_use]
+    pub fn schema(&self) -> &Value {
+        &self.schema
+    }
+
     pub fn check(&self, value: &Value) -> Result<(), String> {
         match self.validator.iter_errors(value).next() {
             None => Ok(()),
