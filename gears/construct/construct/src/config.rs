@@ -1,10 +1,54 @@
+use std::num::{NonZeroU32, NonZeroU64};
+
 use serde::Deserialize;
 use uuid::Uuid;
+
+use crate::domain::planner::agent::PlannerCaps;
 
 /// Default for [`ConstructConfig::personalization_default`]: on, so a host
 /// without the settings service takes records for new subjects. A deployment
 /// that wants new subjects to start with personalization off sets it to false.
 pub const DEFAULT_PERSONALIZATION: bool = true;
+
+/// Default for [`PlannerConfig::max_rounds`].
+pub const DEFAULT_PLANNER_MAX_ROUNDS: NonZeroU32 = match NonZeroU32::new(10) {
+    Some(rounds) => rounds,
+    None => NonZeroU32::MIN,
+};
+
+/// Default for [`PlannerConfig::max_tokens`].
+pub const DEFAULT_PLANNER_MAX_TOKENS: NonZeroU64 = match NonZeroU64::new(50_000) {
+    Some(tokens) => tokens,
+    None => NonZeroU64::MIN,
+};
+
+/// The planner's caps for one record. Zero is refused, so the gear does not start with a cap that drops every record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlannerConfig {
+    /// The most rounds of model calls.
+    pub max_rounds: NonZeroU32,
+    /// The most tokens, input and output, summed over all rounds.
+    pub max_tokens: NonZeroU64,
+}
+
+impl Default for PlannerConfig {
+    fn default() -> Self {
+        Self {
+            max_rounds: DEFAULT_PLANNER_MAX_ROUNDS,
+            max_tokens: DEFAULT_PLANNER_MAX_TOKENS,
+        }
+    }
+}
+
+impl From<PlannerConfig> for PlannerCaps {
+    fn from(config: PlannerConfig) -> Self {
+        Self {
+            max_rounds: config.max_rounds,
+            max_tokens: config.max_tokens,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +64,9 @@ pub struct ConstructConfig {
     /// connector on.
     #[serde(default)]
     pub connectors_off: Vec<Uuid>,
+    /// The planner's caps.
+    #[serde(default)]
+    pub planner: PlannerConfig,
 }
 
 impl Default for ConstructConfig {
@@ -27,6 +74,7 @@ impl Default for ConstructConfig {
         Self {
             personalization_default: DEFAULT_PERSONALIZATION,
             connectors_off: Vec::new(),
+            planner: PlannerConfig::default(),
         }
     }
 }
@@ -75,6 +123,35 @@ mod tests {
             parse(serde_json::json!({ "max_text_length": 10 })).is_err(),
             "the foundation's key is gone"
         );
+    }
+
+    #[test]
+    fn the_planner_caps_are_read() {
+        let config = parse(serde_json::json!({ "planner": { "max_rounds": 4, "max_tokens": 12_000 } }))
+            .expect("caps");
+        assert_eq!(
+            (config.planner.max_rounds.get(), config.planner.max_tokens.get()),
+            (4, 12_000)
+        );
+    }
+
+    #[test]
+    fn a_cap_left_out_takes_its_default() {
+        let config = parse(serde_json::json!({ "planner": { "max_tokens": 12_000 } })).expect("caps");
+        assert_eq!(config.planner.max_rounds.get(), 10);
+        let config = parse(serde_json::json!({ "planner": { "max_rounds": 4 } })).expect("caps");
+        assert_eq!(config.planner.max_tokens.get(), 50_000);
+    }
+
+    #[test]
+    fn a_zero_cap_or_a_typo_stops_the_gear() {
+        for planner in [
+            serde_json::json!({ "max_rounds": 0 }),
+            serde_json::json!({ "max_tokens": 0 }),
+            serde_json::json!({ "max_round": 4 }),
+        ] {
+            assert!(parse(serde_json::json!({ "planner": planner })).is_err(), "{planner}");
+        }
     }
 
     #[test]
