@@ -135,21 +135,23 @@ graph storage implementation of the profile read.
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-algo-planner-loop`
 
-1. [ ] - `p1` - A record without a subject, or without a readable `observed_at`, is dropped with `processing_failed`
-   before any model call - `inst-loop-record`
-2. [ ] - `p1` - The first request holds the instruction, the record's payload and the numbered profile, and offers the
-   three tools - `inst-loop-input`
-3. [ ] - `p1` - Each round sends the conversation so far. The model's tool calls go into the plan draft, and each call
-   gets its result or its refusal back as a tool result - `inst-loop-round`
-4. [ ] - `p1` - An answer without tool calls ends the loop, and the plan is built - `inst-loop-done`
-5. [ ] - `p1` - The tokens of every call add up. Past the token cap, the record is dropped with `token_cap` -
-   `inst-loop-token-cap`
+1. [ ] - `p1` - A record without a subject, or without an `observed_at` in RFC 3339, is dropped with
+   `processing_failed` before any model call - `inst-loop-record`
+2. [ ] - `p1` - The first request holds the instructions, the record's payload and the numbered profile, each marked
+   as data, and offers the three tools - `inst-loop-input`
+3. [ ] - `p1` - Each round sends the conversation so far, and asks for an answer no longer than the tokens still left
+   under the cap. The model's tool calls go into the plan draft; the assistant message comes first, then one tool
+   result per call, with its result or its refusal - `inst-loop-round`
+4. [ ] - `p1` - A text answer without tool calls ends the loop, and the plan is built - `inst-loop-done`
+5. [ ] - `p1` - The tokens of every call add up. Past the token cap, the record is dropped with `token_cap`. A total
+   exactly at the cap is within it - `inst-loop-token-cap`
 6. [ ] - `p1` - When the last allowed round still ends in tool calls, the record is dropped with `round_cap` -
    `inst-loop-round-cap`
-7. [ ] - `p1` - A failed model call drops the record with `model_failed`; the model error is logged without any
-   content - `inst-loop-model-failed`
-8. [ ] - `p1` - A drop is a `DropEvent` through `IntakeEvents`, in the shape Record Intake owns, and no plan comes out
-   - `inst-loop-drop`
+7. [ ] - `p1` - A failed model call, an answer without usage, or a structured answer drops the record with
+   `model_failed`: without usage the token cap cannot hold - `inst-loop-model-failed`
+8. [ ] - `p1` - A drop is a `DropEvent` through `IntakeEvents`, in the shape Record Intake owns, and no plan comes out.
+   The planner also logs the drop by a fixed kind with the tenant and the record type, never with the prompt, the
+   answer or an error text - `inst-loop-drop`
 
 ## 4. States (CDSL)
 
@@ -220,11 +222,8 @@ caps, and **MUST** drop the record with a content-free event and no plan when a 
 - Code: `domain::planner::agent::Planner`, `domain::record_intake::DropCause`, `infra::intake_events`,
   `config::PlannerConfig`
 
-**Verified by**: `the_tool_calls_of_each_round_become_the_plan`,
-`a_refused_tool_call_goes_back_to_the_model_as_the_tool_result`,
-`the_model_gets_the_record_and_the_numbered_profile_but_no_id`,
-`each_failure_drops_the_record_with_its_cause_and_no_plan`, `the_round_cap_stops_the_loop_after_its_last_round`,
-`each_planner_cause_is_logged_by_its_name` and the config test `the_planner_caps_are_read_and_a_typo_is_rejected`.
+**Verified by**: `domain::planner::agent_test`, `each_planner_cause_is_logged_by_its_own_name`, and the config tests
+`the_planner_caps_are_read`, `a_cap_left_out_takes_its_default` and `a_zero_cap_or_a_typo_stops_the_gear`.
 
 ## 6. Acceptance Criteria
 

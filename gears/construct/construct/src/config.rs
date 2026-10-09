@@ -127,17 +127,22 @@ mod tests {
 
     #[test]
     fn the_planner_caps_are_read() {
-        let config = parse(serde_json::json!({ "planner": { "max_rounds": 4, "max_tokens": 12_000 } }))
-            .expect("caps");
+        let config =
+            parse(serde_json::json!({ "planner": { "max_rounds": 4, "max_tokens": 12_000 } }))
+                .expect("caps");
         assert_eq!(
-            (config.planner.max_rounds.get(), config.planner.max_tokens.get()),
+            (
+                config.planner.max_rounds.get(),
+                config.planner.max_tokens.get()
+            ),
             (4, 12_000)
         );
     }
 
     #[test]
     fn a_cap_left_out_takes_its_default() {
-        let config = parse(serde_json::json!({ "planner": { "max_tokens": 12_000 } })).expect("caps");
+        let config =
+            parse(serde_json::json!({ "planner": { "max_tokens": 12_000 } })).expect("caps");
         assert_eq!(config.planner.max_rounds.get(), 10);
         let config = parse(serde_json::json!({ "planner": { "max_rounds": 4 } })).expect("caps");
         assert_eq!(config.planner.max_tokens.get(), 50_000);
@@ -150,7 +155,10 @@ mod tests {
             serde_json::json!({ "max_tokens": 0 }),
             serde_json::json!({ "max_round": 4 }),
         ] {
-            assert!(parse(serde_json::json!({ "planner": planner })).is_err(), "{planner}");
+            assert!(
+                parse(serde_json::json!({ "planner": planner })).is_err(),
+                "{planner}"
+            );
         }
     }
 
