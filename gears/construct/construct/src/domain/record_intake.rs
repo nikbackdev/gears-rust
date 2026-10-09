@@ -233,6 +233,12 @@ pub struct ReceivedRecord {
 pub enum DropCause {
     /// Processing could not finish.
     ProcessingFailed,
+    /// The planner's last round still ended in tool calls.
+    RoundCap,
+    /// The planner's model calls used more tokens than its cap.
+    TokenCap,
+    /// A model call failed, reported no usage, or answered in a form the planner cannot use.
+    ModelFailed,
 }
 
 /// A content-free event for a dropped record: who sent it, for which tenant

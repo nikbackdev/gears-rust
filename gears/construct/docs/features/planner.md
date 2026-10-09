@@ -14,11 +14,13 @@
   - [Show the Profile to the Model](#show-the-profile-to-the-model)
   - [Plan Tools](#plan-tools)
   - [Build the Plan](#build-the-plan)
+  - [Run the Agent Loop](#run-the-agent-loop)
 - [4. States (CDSL)](#4-states-cdsl)
 - [5. Definitions of Done](#5-definitions-of-done)
   - [Numbered Profile](#numbered-profile)
   - [Plan Tools](#plan-tools-1)
   - [Plan Building](#plan-building)
+  - [Agent Loop](#agent-loop)
 - [6. Acceptance Criteria](#6-acceptance-criteria)
 - [7. Non-Functional Considerations](#7-non-functional-considerations)
 
@@ -34,10 +36,10 @@
 ### 1.1 Overview
 
 The planner decides how a record changes the subject's profile. A language model proposes add, replace and remove
-steps through tools; the planner builds them into a plan in memory and writes nothing. This document covers the first
-part: the profile read port, the numbered profile the model sees, the plan tools with their checks, and building the
-plan with its node keys and origin. The agent loop with its caps, the prompt, the hand-off from intake and the rerun on
-a write conflict follow in later changes.
+steps through tools; the planner builds them into a plan in memory and writes nothing. This document covers the profile
+read port, the numbered profile the model sees, the plan tools with their checks, building the plan with its node keys
+and origin, and the agent loop with its caps and drop events. The prompt, the hand-off from intake and the rerun on a
+write conflict follow in later changes.
 
 ### 1.2 Purpose
 
@@ -46,7 +48,7 @@ The model works on numbered values and plain property names, never on IDs
 (`cpt-cf-construct-principle-model-never-sees-ids`). The tools refuse a call that breaks a rule and tell the model
 why, so the plan holds only steps that fit the person types.
 
-**Out of scope**: the agent loop, its caps and drop events; the prompt; the hand-off from Record Intake and the
+**Out of scope**: the prompt, beyond a short instruction; the hand-off from Record Intake and the
 processing chain; the rerun on a write conflict; skipping a fact under an open review request (Review Queue); the
 graph storage implementation of the profile read.
 
@@ -129,6 +131,28 @@ graph storage implementation of the profile read.
    from: the connector, the record type, its provenance and version, and its `observed_at` - `inst-build-origin`
 5. [ ] - `p1` - Each step carries the confidence the model gave it - `inst-build-confidence`
 
+### Run the Agent Loop
+
+- [ ] `p1` - **ID**: `cpt-cf-construct-algo-planner-loop`
+
+1. [ ] - `p1` - A record without a subject, or without an `observed_at` in RFC 3339, is dropped with
+   `processing_failed` before any model call - `inst-loop-record`
+2. [ ] - `p1` - The first request holds the instructions, the record's payload and the numbered profile, each marked
+   as data, and offers the three tools - `inst-loop-input`
+3. [ ] - `p1` - Each round sends the conversation so far, and asks for an answer no longer than the tokens still left
+   under the cap. The model's tool calls go into the plan draft; the assistant message comes first, then one tool
+   result per call, with its result or its refusal - `inst-loop-round`
+4. [ ] - `p1` - A text answer without tool calls ends the loop, and the plan is built - `inst-loop-done`
+5. [ ] - `p1` - The tokens of every call add up. Past the token cap, the record is dropped with `token_cap`. A total
+   exactly at the cap is within it - `inst-loop-token-cap`
+6. [ ] - `p1` - When the last allowed round still ends in tool calls, the record is dropped with `round_cap` -
+   `inst-loop-round-cap`
+7. [ ] - `p1` - A failed model call, an answer without usage, or a structured answer drops the record with
+   `model_failed`: without usage the token cap cannot hold - `inst-loop-model-failed`
+8. [ ] - `p1` - A drop is a `DropEvent` through `IntakeEvents`, in the shape Record Intake owns, and no plan comes out.
+   The planner also logs the drop by a fixed kind with the tenant and the record type, never with the prompt, the
+   answer or an error text - `inst-loop-drop`
+
 ## 4. States (CDSL)
 
 None. A plan lives in memory for one planning run.
@@ -184,16 +208,38 @@ and profile version.
 `every_new_value_gets_its_own_new_key_also_when_it_returns`, `the_record_origin_comes_from_the_received_record` and
 `a_record_without_a_readable_observed_at_has_no_origin`.
 
+### Agent Loop
+
+- [x] `p1` - **ID**: `cpt-cf-construct-dod-planner-loop`
+
+The system **MUST** run the model in rounds until it answers without tool calls, **MUST** stop at the round and token
+caps, and **MUST** drop the record with a content-free event and no plan when a cap is hit or the model call fails.
+
+**Implements**:
+- `cpt-cf-construct-algo-planner-loop`
+
+**Touches**:
+- Code: `domain::planner::agent::Planner`, `domain::record_intake::DropCause`, `infra::intake_events`,
+  `config::PlannerConfig`
+
+**Verified by**: `domain::planner::agent_test`, `each_planner_cause_is_logged_by_its_own_name`, and the config tests
+`the_planner_caps_are_read`, `a_cap_left_out_takes_its_default` and `a_zero_cap_or_a_typo_stops_the_gear`.
+
 ## 6. Acceptance Criteria
 
 - [ ] For a record and a profile, the planner builds a plan of add, replace and remove steps with node keys, the
       profile version and the record's origin.
 - [ ] No message or tool result sent to the model holds an ID.
 - [ ] A tool call that breaks a rule is refused with a reason, and the plan does not change.
+- [ ] A loop that hits a cap, or a failed model call, drops the record with a content-free event and gives no plan.
 
 ## 7. Non-Functional Considerations
 
 - **Privacy**: the numbered profile and the record reach the configured model service through the model client. The
   planner logs neither.
+- **Caps**: `planner.max_rounds` is 10 and `planner.max_tokens` is 50 000 by default, the sum of input and output
+  tokens of all rounds. A record usually needs one to three rounds: tool calls, then an answer. Ten rounds leave room for
+  the refusals the model has to correct and still end a loop that never answers. Each round sends the whole
+  conversation again, so the token cap is sized for ten rounds over the instructions and a large profile.
 - **Plan type**: `domain::plan` holds the tenant and the subject, the record the plan came from, the profile version
   and the steps.
