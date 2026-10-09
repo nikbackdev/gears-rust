@@ -1,5 +1,5 @@
 {
-  "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~cf.construct.person.skills.v1~",
+  "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~cf.construct.person.skill.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "A person's skills: skills, languages, research areas, publications, awards and research metrics. One node is one fact: its payload holds one property, which names the fact, and the origin of the fact.",
   "type": "object",
@@ -13,14 +13,45 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "minProperties": 2,
-          "maxProperties": 2,
           "required": [
             "origin"
           ],
           "properties": {
             "origin": {
               "$ref": "gts://gts.cf.core.graph.attribute.v1~cf.core.graph.provenance.v1~"
+            },
+            "record": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "connector",
+                "provenance",
+                "version"
+              ],
+              "description": "The record a fact came from, when it came from one: the connector that sent it and the record's identity.",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S",
+                  "description": "The connector that sent the record."
+                },
+                "provenance": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S",
+                  "description": "The record's identity within the connector."
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S",
+                  "description": "The record's version."
+                }
+              }
             },
             "activity_by_year": {
               "type": "object",
@@ -53,7 +84,9 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S"
                 },
                 "year": {
                   "type": "integer",
@@ -62,13 +95,17 @@
                 },
                 "issuer": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S"
                 }
               }
             },
             "career_stage": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "first_publication_year": {
               "type": "integer",
@@ -86,7 +123,8 @@
             "languages": {
               "type": "string",
               "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$",
-              "description": "ISO 639 language code, optionally with an ISO 3166 region: en, de, en-GB."
+              "description": "ISO 639 language code, optionally with an ISO 3166 region: en, de, en-GB.",
+              "maxLength": 100
             },
             "latest_publication_year": {
               "type": "integer",
@@ -99,7 +137,9 @@
             },
             "primary_research_area": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "publications": {
               "type": "object",
@@ -110,7 +150,9 @@
               "properties": {
                 "title": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S"
                 },
                 "year": {
                   "type": "integer",
@@ -119,20 +161,25 @@
                 },
                 "venue": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S"
                 },
                 "doi": {
                   "type": "string",
-                  "pattern": "^10\\.\\d{4,9}/\\S+$"
+                  "pattern": "^10\\.\\d{4,9}/\\S+$",
+                  "maxLength": 100
                 },
                 "url": {
                   "type": "string",
                   "format": "uri",
-                  "pattern": "^https?://"
+                  "pattern": "^https?://",
+                  "maxLength": 2048
                 },
                 "openalex_id": {
                   "type": "string",
-                  "pattern": "^W\\d+$"
+                  "pattern": "^W\\d+$",
+                  "maxLength": 100
                 }
               }
             },
@@ -145,7 +192,9 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S"
                 },
                 "weight": {
                   "type": "number",
@@ -163,7 +212,9 @@
               "properties": {
                 "name": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S"
                 },
                 "level": {
                   "type": "string",
@@ -188,7 +239,25 @@
               "type": "integer",
               "minimum": 0
             }
-          }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "record"
+              ],
+              "minProperties": 3,
+              "maxProperties": 3
+            },
+            {
+              "not": {
+                "required": [
+                  "record"
+                ]
+              },
+              "minProperties": 2,
+              "maxProperties": 2
+            }
+          ]
         }
       },
       "required": [

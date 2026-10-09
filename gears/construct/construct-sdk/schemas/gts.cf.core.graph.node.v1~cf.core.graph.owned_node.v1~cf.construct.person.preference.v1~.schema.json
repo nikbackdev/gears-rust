@@ -1,5 +1,5 @@
 {
-  "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~cf.construct.person.preferences.v1~",
+  "$id": "gts://gts.cf.core.graph.node.v1~cf.core.graph.owned_node.v1~cf.construct.person.preference.v1~",
   "$schema": "http://json-schema.org/draft-07/schema#",
   "description": "How a person wants to be served: language, format, tone, accessibility, constraints and goals. One node is one fact: its payload holds one property, which names the fact, and the origin of the fact.",
   "type": "object",
@@ -13,8 +13,6 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "minProperties": 2,
-          "maxProperties": 2,
           "required": [
             "origin"
           ],
@@ -22,18 +20,56 @@
             "origin": {
               "$ref": "gts://gts.cf.core.graph.attribute.v1~cf.core.graph.provenance.v1~"
             },
+            "record": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "connector",
+                "provenance",
+                "version"
+              ],
+              "description": "The record a fact came from, when it came from one: the connector that sent it and the record's identity.",
+              "properties": {
+                "connector": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S",
+                  "description": "The connector that sent the record."
+                },
+                "provenance": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S",
+                  "description": "The record's identity within the connector."
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500,
+                  "pattern": "\\S",
+                  "description": "The record's version."
+                }
+              }
+            },
             "analogy_domain": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "answer_language": {
               "type": "string",
               "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$",
-              "description": "ISO 639 language code, optionally with an ISO 3166 region: en, de, en-GB."
+              "description": "ISO 639 language code, optionally with an ISO 3166 region: en, de, en-GB.",
+              "maxLength": 100
             },
             "assistive_tools": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "average_session_length": {
               "type": "integer",
@@ -70,7 +106,9 @@
             },
             "cognitive_load_hint": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "collaboration_style": {
               "type": "string",
@@ -92,16 +130,21 @@
             },
             "content_maturity_level": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "current_focus_areas": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "dialect": {
               "type": "string",
               "pattern": "^[a-z]{2,3}(-[A-Z][a-z]{3})?(-[A-Z]{2})?$",
-              "description": "BCP 47 language tag: en-US, bg-BG."
+              "description": "BCP 47 language tag: en-US, bg-BG.",
+              "maxLength": 100
             },
             "dyslexia_friendly": {
               "type": "boolean"
@@ -127,37 +170,35 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "days",
+                "day",
                 "start",
                 "end"
               ],
               "properties": {
-                "days": {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "enum": [
-                      "mon",
-                      "tue",
-                      "wed",
-                      "thu",
-                      "fri",
-                      "sat",
-                      "sun"
-                    ]
-                  }
+                "day": {
+                  "type": "string",
+                  "enum": [
+                    "mon",
+                    "tue",
+                    "wed",
+                    "thu",
+                    "fri",
+                    "sat",
+                    "sun"
+                  ],
+                  "description": "Day of the week."
                 },
                 "start": {
                   "type": "string",
                   "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-                  "description": "Local time, HH:MM."
+                  "description": "Local time, HH:MM.",
+                  "maxLength": 100
                 },
                 "end": {
                   "type": "string",
                   "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-                  "description": "Local time, HH:MM."
+                  "description": "Local time, HH:MM.",
+                  "maxLength": 100
                 }
               }
             },
@@ -207,7 +248,9 @@
             },
             "long_term_goals": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "math_notation": {
               "type": "string",
@@ -220,11 +263,15 @@
             },
             "modality_sensitivity": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "motivation": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "notification_type": {
               "type": "string",
@@ -238,7 +285,9 @@
             },
             "nudge_preference": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "preferred_format": {
               "type": "string",
@@ -269,7 +318,9 @@
             },
             "readiness_hint": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "reading_level": {
               "type": "string",
@@ -284,51 +335,55 @@
             },
             "runtime_constraint": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "self_efficacy": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "short_term_goals": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "study_window": {
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "days",
+                "day",
                 "start",
                 "end"
               ],
               "properties": {
-                "days": {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "enum": [
-                      "mon",
-                      "tue",
-                      "wed",
-                      "thu",
-                      "fri",
-                      "sat",
-                      "sun"
-                    ]
-                  }
+                "day": {
+                  "type": "string",
+                  "enum": [
+                    "mon",
+                    "tue",
+                    "wed",
+                    "thu",
+                    "fri",
+                    "sat",
+                    "sun"
+                  ],
+                  "description": "Day of the week."
                 },
                 "start": {
                   "type": "string",
                   "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-                  "description": "Local time, HH:MM."
+                  "description": "Local time, HH:MM.",
+                  "maxLength": 100
                 },
                 "end": {
                   "type": "string",
                   "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-                  "description": "Local time, HH:MM."
+                  "description": "Local time, HH:MM.",
+                  "maxLength": 100
                 }
               }
             },
@@ -346,43 +401,43 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "days",
+                "day",
                 "start",
                 "end"
               ],
               "properties": {
-                "days": {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "enum": [
-                      "mon",
-                      "tue",
-                      "wed",
-                      "thu",
-                      "fri",
-                      "sat",
-                      "sun"
-                    ]
-                  }
+                "day": {
+                  "type": "string",
+                  "enum": [
+                    "mon",
+                    "tue",
+                    "wed",
+                    "thu",
+                    "fri",
+                    "sat",
+                    "sun"
+                  ],
+                  "description": "Day of the week."
                 },
                 "start": {
                   "type": "string",
                   "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-                  "description": "Local time, HH:MM."
+                  "description": "Local time, HH:MM.",
+                  "maxLength": 100
                 },
                 "end": {
                   "type": "string",
                   "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$",
-                  "description": "Local time, HH:MM."
+                  "description": "Local time, HH:MM.",
+                  "maxLength": 100
                 }
               }
             },
             "time_constraint": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "tone_preference": {
               "type": "string",
@@ -394,12 +449,15 @@
             },
             "tool_preference": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 500,
+              "pattern": "\\S"
             },
             "ui_language": {
               "type": "string",
               "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$",
-              "description": "ISO 639 language code, optionally with an ISO 3166 region: en, de, en-GB."
+              "description": "ISO 639 language code, optionally with an ISO 3166 region: en, de, en-GB.",
+              "maxLength": 100
             },
             "units": {
               "type": "string",
@@ -408,7 +466,25 @@
                 "imperial"
               ]
             }
-          }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "record"
+              ],
+              "minProperties": 3,
+              "maxProperties": 3
+            },
+            {
+              "not": {
+                "required": [
+                  "record"
+                ]
+              },
+              "minProperties": 2,
+              "maxProperties": 2
+            }
+          ]
         }
       },
       "required": [

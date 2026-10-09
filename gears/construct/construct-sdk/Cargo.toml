@@ -32,5 +32,6 @@ toolkit-macros = { workspace = true }
 toolkit-security = { workspace = true }
 
 [dev-dependencies]
+graph-storage-sdk = { workspace = true }
 jsonschema = { workspace = true }
 serde_json = { workspace = true }
