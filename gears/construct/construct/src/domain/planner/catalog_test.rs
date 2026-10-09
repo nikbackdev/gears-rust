@@ -1,11 +1,11 @@
 use construct_sdk::person_types::PROPERTIES;
 use serde_json::json;
 
-use super::catalog::PropertyCatalog;
+use super::test_data::catalog;
 
 #[test]
-fn every_property_of_the_person_types_has_its_category_cardinality_and_value_check() {
-    let catalog = PropertyCatalog::load().expect("the catalog");
+fn every_property_of_the_person_types_has_its_category_and_cardinality() {
+    let catalog = catalog();
 
     for (type_id, property, cardinality) in PROPERTIES {
         let spec = catalog.get(property).expect("a listed property");
@@ -16,14 +16,27 @@ fn every_property_of_the_person_types_has_its_category_cardinality_and_value_che
 }
 
 #[test]
-fn a_value_is_checked_against_its_property_schema() {
-    let catalog = PropertyCatalog::load().expect("the catalog");
+fn each_property_checks_a_value_against_its_own_schema() {
+    let catalog = catalog();
+
+    for property in catalog.names() {
+        let spec = catalog.get(property).expect("a listed property");
+        let refusal = spec
+            .check(&json!({ "no_such_field": true }))
+            .expect_err("an object with an unknown field fits no property");
+        assert!(
+            refusal.ends_with(&format!("it takes {}", spec.schema())),
+            "{property}: {refusal}"
+        );
+    }
+}
+
+#[test]
+fn an_orcid_must_have_the_orcid_form() {
+    let catalog = catalog();
     let orcid = catalog.get("orcid_id").expect("orcid_id");
 
-    assert!(orcid.check(&json!("0000-0002-1825-0097")).is_ok());
+    assert_eq!(orcid.check(&json!("0000-0002-1825-0097")), Ok(()));
     assert!(orcid.check(&json!(42)).is_err());
-    let refusal = orcid
-        .check(&json!("orcid of Jane"))
-        .expect_err("not an ORCID");
-    assert!(refusal.contains("it takes"), "{refusal}");
+    assert!(orcid.check(&json!("orcid of Jane")).is_err());
 }

@@ -19,6 +19,8 @@ pub mod record_intake;
 pub mod subject_settings;
 
 #[cfg(test)]
+mod plan_test;
+#[cfg(test)]
 mod record_intake_test;
 #[cfg(test)]
 mod subject_settings_test;

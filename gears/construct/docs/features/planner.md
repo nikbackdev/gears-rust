@@ -16,7 +16,6 @@
   - [Build the Plan](#build-the-plan)
 - [4. States (CDSL)](#4-states-cdsl)
 - [5. Definitions of Done](#5-definitions-of-done)
-  - [Profile Read Port](#profile-read-port)
   - [Numbered Profile](#numbered-profile)
   - [Plan Tools](#plan-tools-1)
   - [Plan Building](#plan-building)
@@ -80,12 +79,11 @@ graph storage implementation of the profile read.
 
 - [ ] `p1` - **ID**: `cpt-cf-construct-algo-planner-read-profile`
 
-1. [ ] - `p1` - The planner reads the subject's current profile and its version through the `ProfileSource` port, not
-   through the Profile Reader or the writer - `inst-read-port`
+1. [ ] - `p1` - The planner works on the subject's current profile and its version, read from graph storage, not
+   through the Profile Reader or the writer. The read itself comes with the change that reads graph storage -
+   `inst-read-source`
 2. [ ] - `p1` - Each fact comes with its node key, its category, its property and its value. The version is the root
    node's version, which the planner carries as an opaque value into the plan - `inst-read-facts`
-3. [ ] - `p1` - The graph storage implementation of the port comes with the writer's read side. Until then the port
-   has no implementation in the gear - `inst-read-later`
 
 ### Show the Profile to the Model
 
@@ -93,7 +91,8 @@ graph storage implementation of the profile read.
 
 1. [ ] - `p1` - Each fact is one line: `n. property (category): value`, numbered from 1 in the order of the read -
    `inst-number-lines`
-2. [ ] - `p1` - A text value is shown as it is; any other value as compact JSON - `inst-number-values`
+2. [ ] - `p1` - Every value is shown as compact JSON, a text value as a JSON string, so a line break in a value cannot
+   start a line that looks like another value - `inst-number-values`
 3. [ ] - `p1` - The model never sees a node key, a tenant or subject id, a type id or the fact's origin - `inst-number-no-ids`
 
 ### Plan Tools
@@ -108,10 +107,14 @@ graph storage implementation of the profile read.
    and the schema the property takes - `inst-tools-value`
 4. [ ] - `p1` - A number must name a value of the profile, and only one step may use it - `inst-tools-number`
 5. [ ] - `p1` - A property that holds one value takes no second one: an `add` is refused while the profile holds an
-   untouched value of it, with "use replace n", or while the plan already adds one. After a `remove` of the old value,
-   an `add` is allowed - `inst-tools-cardinality`
-6. [ ] - `p1` - Confidence is a number from 0 to 1 - `inst-tools-confidence`
-7. [ ] - `p1` - A refused call adds no step; the model gets the refusal's text as the tool result - `inst-tools-refusal`
+   untouched value of it, with "use replace n", or while the plan already adds or replaces one. After a `remove` of
+   the old value, an `add` is allowed - `inst-tools-cardinality`
+6. [ ] - `p1` - A value already held is refused: an `add` of a value the profile holds under the same property, an
+   `add` of a value the plan already writes there, and a `replace` with the value the fact already has. Text is
+   compared without case and surrounding spaces - `inst-tools-duplicate`
+7. [ ] - `p1` - `replace` takes the complete new value: fields left out of an object are gone - `inst-tools-replace`
+8. [ ] - `p1` - Confidence is a number from 0 to 1 - `inst-tools-confidence`
+9. [ ] - `p1` - A refused call adds no step; the model gets the refusal's text as the tool result - `inst-tools-refusal`
 
 ### Build the Plan
 
@@ -120,11 +123,10 @@ graph storage implementation of the profile read.
 1. [ ] - `p1` - Each number maps back to its node key - `inst-build-keys`
 2. [ ] - `p1` - Each new value gets a new node key, `construct:{tenant id}:{random UUID}`, also a value that returns
    after a delete, because a soft-deleted key cannot be reused - `inst-build-new-keys`
-3. [ ] - `p1` - A replace is one step with the old key and a new key, so the old value goes in the same write -
-   `inst-build-replace`
-4. [ ] - `p1` - The plan holds the tenant, the subject, the profile version it was built on and its origin. For a
-   record the origin is the connector, the record type, its provenance and version, and its `observed_at` -
-   `inst-build-origin`
+3. [ ] - `p1` - A replace is one step with the old key and a new key, so the old value goes in the same write. A step
+   names a key it creates `node_key` and a key it deletes `old_key` - `inst-build-replace`
+4. [ ] - `p1` - The plan holds the tenant and the subject, the profile version it was built on and the record it came
+   from: the connector, the record type, its provenance and version, and its `observed_at` - `inst-build-origin`
 5. [ ] - `p1` - Each step carries the confidence the model gave it - `inst-build-confidence`
 
 ## 4. States (CDSL)
@@ -132,21 +134,6 @@ graph storage implementation of the profile read.
 None. A plan lives in memory for one planning run.
 
 ## 5. Definitions of Done
-
-### Profile Read Port
-
-- [x] `p1` - **ID**: `cpt-cf-construct-dod-planner-profile-read`
-
-The system **MUST** read the profile through one port that returns the facts with their node keys and the profile
-version.
-
-**Implements**:
-- `cpt-cf-construct-algo-planner-read-profile`
-
-**Touches**:
-- Code: `domain::profile::ProfileSource`
-
-**Verified by**: the plan tests, which build a draft from a profile as the port returns it.
 
 ### Numbered Profile
 
@@ -160,7 +147,8 @@ The system **MUST** show the profile as numbered values of plain properties, and
 **Touches**:
 - Code: `domain::planner::draft::PlanDraft`
 
-**Verified by**: `the_profile_is_shown_as_numbered_values_of_plain_properties` and `the_model_input_holds_no_id`.
+**Verified by**: `the_profile_is_shown_as_numbered_values_of_plain_properties_in_json`,
+`a_line_break_in_a_value_cannot_forge_a_profile_line` and `the_model_input_holds_no_id`.
 
 ### Plan Tools
 
@@ -173,10 +161,10 @@ adding a step.
 - `cpt-cf-construct-algo-planner-tools`
 
 **Touches**:
-- Code: `domain::planner::draft::PlanDraft::apply`, `domain::planner::catalog::PropertyCatalog`
+- Code: `domain::planner::draft::PlanDraft::apply`, `domain::planner::tools`, `domain::planner::catalog::PropertyCatalog`
 
-**Verified by**: `a_call_that_breaks_a_rule_is_refused_and_adds_no_step`, `a_refusal_tells_the_model_what_to_do_instead`,
-`a_single_value_can_be_added_after_its_old_value_is_removed`, and the catalog tests.
+**Verified by**: one test per refusal in `domain::planner::draft_test`, each checking that the draft did not change,
+and the catalog tests.
 
 ### Plan Building
 
@@ -189,11 +177,12 @@ and profile version.
 - `cpt-cf-construct-algo-planner-build`
 
 **Touches**:
-- Code: `domain::planner::draft::PlanDraft::finish`, `domain::plan`
+- Code: `domain::planner::build`, `domain::plan`
 
 **Verified by**: `a_replace_is_one_step_with_the_old_key_and_a_new_one`,
-`an_add_and_a_remove_become_steps_of_one_plan_on_the_profile_version`,
-`every_new_value_gets_its_own_new_key_also_when_it_returns` and `the_record_origin_comes_from_the_received_record`.
+`an_add_and_a_remove_keep_their_confidence_in_a_plan_on_the_profile_version`,
+`every_new_value_gets_its_own_new_key_also_when_it_returns`, `the_record_origin_comes_from_the_received_record` and
+`a_record_without_a_readable_observed_at_has_no_origin`.
 
 ## 6. Acceptance Criteria
 
@@ -206,4 +195,5 @@ and profile version.
 
 - **Privacy**: the numbered profile and the record reach the configured model service through the model client. The
   planner logs neither.
-- **Plan type**: `domain::plan` holds the plan shape agreed for Story 5.7.3, until that change brings its own.
+- **Plan type**: `domain::plan` holds the tenant and the subject, the record the plan came from, the profile version
+  and the steps.

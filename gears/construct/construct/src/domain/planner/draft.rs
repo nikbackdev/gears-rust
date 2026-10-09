@@ -1,66 +1,17 @@
-use std::collections::BTreeSet;
-
 use construct_sdk::person_types::Cardinality;
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
-use uuid::Uuid;
+use serde_json::Value;
+use toolkit_macros::domain_model;
 
 use super::catalog::PropertyCatalog;
+use super::tools::{
+    ADD, AddArguments, REMOVE, REPLACE, RemoveArguments, ReplaceArguments, ToolRefusal,
+    parse_arguments, tool_specs,
+};
 use crate::domain::model_client::{ToolCall, ToolSpec};
-use crate::domain::plan::{NewFact, Plan, PlanOrigin, Step};
 use crate::domain::profile::{Category, Fact, Profile, ProfileVersion};
 
-pub const ADD: &str = "add";
-pub const REPLACE: &str = "replace";
-pub const REMOVE: &str = "remove";
-
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub enum ToolRefusal {
-    #[error("there is no tool `{0}`; use add, replace or remove")]
-    UnknownTool(String),
-    #[error("the arguments do not fit the tool: {0}")]
-    BadArguments(String),
-    #[error("confidence must be a number from 0 to 1")]
-    BadConfidence,
-    #[error("there is no value {0} in the profile")]
-    UnknownNumber(usize),
-    #[error("value {0} already has a step in this plan")]
-    NumberUsed(usize),
-    #[error("there is no property `{property}`; use one of: {known}")]
-    UnknownProperty { property: String, known: String },
-    #[error("the value does not fit `{property}`: {reason}")]
-    ValueDoesNotFit { property: String, reason: String },
-    #[error("`{property}` holds one value, and value {number} is it; use replace {number}")]
-    SecondValue { property: String, number: usize },
-    #[error("`{property}` holds one value, and this plan already adds one")]
-    SecondValueInPlan { property: String },
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AddArguments {
-    property: String,
-    value: Value,
-    confidence: f64,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReplaceArguments {
-    number: usize,
-    value: Value,
-    confidence: f64,
-}
-
-#[derive(Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RemoveArguments {
-    number: usize,
-    confidence: f64,
-}
-
-enum DraftStep {
+#[derive(Debug)]
+pub(super) enum DraftStep {
     Add {
         category: Category,
         property: String,
@@ -68,114 +19,76 @@ enum DraftStep {
         confidence: f64,
     },
     Replace {
-        number: usize,
+        old: Fact,
         value: Value,
         confidence: f64,
     },
     Remove {
-        number: usize,
+        old: Fact,
         confidence: f64,
     },
 }
 
+/// A plan being built from the model's tool calls. Each step takes its profile value out of the draft, so a number
+/// names one step at most.
+///
 /// @cpt-dod:cpt-cf-construct-dod-planner-numbered-profile:p1
+#[domain_model]
+#[derive(Debug)]
 pub struct PlanDraft<'a> {
     catalog: &'a PropertyCatalog,
-    facts: Vec<Fact>,
-    version: ProfileVersion,
-    used: BTreeSet<usize>,
-    steps: Vec<DraftStep>,
+    facts: Vec<Option<Fact>>,
+    pub(super) version: ProfileVersion,
+    pub(super) steps: Vec<DraftStep>,
 }
 
 impl<'a> PlanDraft<'a> {
+    /// A draft over `profile`, with no steps yet.
     #[must_use]
     pub fn new(catalog: &'a PropertyCatalog, profile: Profile) -> Self {
         Self {
             catalog,
-            facts: profile.facts,
+            facts: profile.facts.into_iter().map(Some).collect(),
             version: profile.version,
-            used: BTreeSet::new(),
             steps: Vec::new(),
         }
     }
 
+    /// The profile as the model sees it: one line per value, `n. property (category): value`, with every value as
+    /// JSON, so a line break in a value cannot start another line.
     #[must_use]
     pub fn numbered_profile(&self) -> String {
-        self.facts
-            .iter()
-            .enumerate()
-            .map(|(index, fact)| {
+        self.untouched()
+            .map(|(number, fact)| {
                 format!(
-                    "{}. {} ({}): {}",
-                    index + 1,
+                    "{number}. {} ({}): {}",
                     fact.property,
                     fact.category.name(),
-                    shown(&fact.value)
+                    fact.value
                 )
             })
             .collect::<Vec<_>>()
             .join("\n")
     }
 
+    /// The tools the model may call on this draft.
     #[must_use]
     pub fn tools(&self) -> Vec<ToolSpec> {
-        let confidence = json!({ "type": "number", "minimum": 0, "maximum": 1 });
-        let number = json!({ "type": "integer", "minimum": 1 });
-        let value = json!({ "description": "The value, in the form the property takes." });
-        vec![
-            ToolSpec {
-                name: ADD.to_owned(),
-                description: "Add a new value of a property to the profile.".to_owned(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "property": { "type": "string", "enum": self.catalog.names().collect::<Vec<_>>() },
-                        "value": value,
-                        "confidence": confidence,
-                    },
-                    "required": ["property", "value", "confidence"],
-                    "additionalProperties": false,
-                }),
-            },
-            ToolSpec {
-                name: REPLACE.to_owned(),
-                description: "Replace the profile value with this number by a new value."
-                    .to_owned(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": { "number": number, "value": value, "confidence": confidence },
-                    "required": ["number", "value", "confidence"],
-                    "additionalProperties": false,
-                }),
-            },
-            ToolSpec {
-                name: REMOVE.to_owned(),
-                description: "Remove the profile value with this number.".to_owned(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": { "number": number, "confidence": confidence },
-                    "required": ["number", "confidence"],
-                    "additionalProperties": false,
-                }),
-            },
-        ]
+        tool_specs(self.catalog)
     }
 
+    /// Applies one tool call.
+    ///
+    /// # Errors
+    ///
+    /// [`ToolRefusal`] when the call breaks a rule; the draft does not change.
+    ///
     /// @cpt-dod:cpt-cf-construct-dod-planner-tools:p1
     pub fn apply(&mut self, call: &ToolCall) -> Result<String, ToolRefusal> {
         match call.name.as_str() {
-            ADD => {
-                let arguments: AddArguments = arguments(&call.arguments)?;
-                self.add(arguments)
-            }
-            REPLACE => {
-                let arguments: ReplaceArguments = arguments(&call.arguments)?;
-                self.replace(arguments)
-            }
-            REMOVE => {
-                let arguments: RemoveArguments = arguments(&call.arguments)?;
-                self.remove(arguments)
-            }
+            ADD => self.add(parse_arguments(&call.arguments)?),
+            REPLACE => self.replace(parse_arguments(&call.arguments)?),
+            REMOVE => self.remove(parse_arguments(&call.arguments)?),
             other => Err(ToolRefusal::UnknownTool(other.to_owned())),
         }
     }
@@ -187,22 +100,26 @@ impl<'a> PlanDraft<'a> {
             confidence,
         } = arguments;
         check_confidence(confidence)?;
-        let Some(spec) = self.catalog.get(&property) else {
-            return Err(ToolRefusal::UnknownProperty {
-                property,
-                known: self.catalog.names().collect::<Vec<_>>().join(", "),
-            });
-        };
+        let spec = self
+            .catalog
+            .get(&property)
+            .ok_or_else(|| self.unknown(&property))?;
         spec.check(&value)
             .map_err(|reason| ToolRefusal::ValueDoesNotFit {
                 property: property.clone(),
                 reason,
             })?;
+        if let Some(number) = self.held_number(&property, &value) {
+            return Err(ToolRefusal::AlreadyHeld { number });
+        }
+        if self.plan_writes(&property, Some(&value)) {
+            return Err(ToolRefusal::AlreadyAdded { property });
+        }
         if spec.cardinality == Cardinality::One {
             if let Some(number) = self.untouched_number(&property) {
                 return Err(ToolRefusal::SecondValue { property, number });
             }
-            if self.adds(&property) {
+            if self.plan_writes(&property, None) {
                 return Err(ToolRefusal::SecondValueInPlan { property });
             }
         }
@@ -224,19 +141,21 @@ impl<'a> PlanDraft<'a> {
         } = arguments;
         check_confidence(confidence)?;
         let fact = self.free_fact(number)?;
-        let property = fact.property.clone();
         let spec = self
             .catalog
-            .get(&property)
-            .ok_or_else(|| ToolRefusal::UnknownProperty {
-                property: property.clone(),
-                known: self.catalog.names().collect::<Vec<_>>().join(", "),
-            })?;
+            .get(&fact.property)
+            .ok_or_else(|| self.unknown(&fact.property))?;
         spec.check(&value)
-            .map_err(|reason| ToolRefusal::ValueDoesNotFit { property, reason })?;
-        self.used.insert(number);
+            .map_err(|reason| ToolRefusal::ValueDoesNotFit {
+                property: fact.property.clone(),
+                reason,
+            })?;
+        if same_value(&fact.value, &value) {
+            return Err(ToolRefusal::AlreadyHeld { number });
+        }
+        let old = self.take(number)?;
         self.steps.push(DraftStep::Replace {
-            number,
+            old,
             value,
             confidence,
         });
@@ -246,96 +165,68 @@ impl<'a> PlanDraft<'a> {
     fn remove(&mut self, arguments: RemoveArguments) -> Result<String, ToolRefusal> {
         let RemoveArguments { number, confidence } = arguments;
         check_confidence(confidence)?;
-        self.free_fact(number)?;
-        self.used.insert(number);
-        self.steps.push(DraftStep::Remove { number, confidence });
+        let old = self.take(number)?;
+        self.steps.push(DraftStep::Remove { old, confidence });
         Ok(format!("removed {number}"))
     }
 
+    fn unknown(&self, property: &str) -> ToolRefusal {
+        ToolRefusal::UnknownProperty {
+            property: property.to_owned(),
+            known: self.catalog.names().collect::<Vec<_>>().join(", "),
+        }
+    }
+
     fn free_fact(&self, number: usize) -> Result<&Fact, ToolRefusal> {
-        let fact = number
+        let slot = number
             .checked_sub(1)
             .and_then(|index| self.facts.get(index))
             .ok_or(ToolRefusal::UnknownNumber(number))?;
-        if self.used.contains(&number) {
-            return Err(ToolRefusal::NumberUsed(number));
-        }
-        Ok(fact)
+        slot.as_ref().ok_or(ToolRefusal::NumberUsed(number))
     }
 
-    fn untouched_number(&self, property: &str) -> Option<usize> {
+    fn take(&mut self, number: usize) -> Result<Fact, ToolRefusal> {
+        self.free_fact(number)?;
+        number
+            .checked_sub(1)
+            .and_then(|index| self.facts.get_mut(index))
+            .and_then(Option::take)
+            .ok_or(ToolRefusal::NumberUsed(number))
+    }
+
+    fn untouched(&self) -> impl Iterator<Item = (usize, &Fact)> {
         self.facts
             .iter()
             .enumerate()
-            .map(|(index, fact)| (index + 1, fact))
-            .find(|(number, fact)| fact.property == property && !self.used.contains(number))
+            .filter_map(|(index, fact)| fact.as_ref().map(|fact| (index + 1, fact)))
+    }
+
+    fn untouched_number(&self, property: &str) -> Option<usize> {
+        self.untouched()
+            .find(|(_, fact)| fact.property == property)
             .map(|(number, _)| number)
     }
 
-    fn adds(&self, property: &str) -> bool {
-        self.steps
-            .iter()
-            .any(|step| matches!(step, DraftStep::Add { property: added, .. } if added == property))
+    fn held_number(&self, property: &str, value: &Value) -> Option<usize> {
+        self.untouched()
+            .find(|(_, fact)| fact.property == property && same_value(&fact.value, value))
+            .map(|(number, _)| number)
     }
 
-    /// @cpt-dod:cpt-cf-construct-dod-planner-plan:p1
-    #[must_use]
-    pub fn finish(self, tenant_id: Uuid, subject_id: Uuid, origin: PlanOrigin) -> Plan {
-        let new_key = || format!("construct:{tenant_id}:{}", Uuid::new_v4());
-        let fact = |number: usize| &self.facts[number - 1];
-        let steps = self
-            .steps
-            .iter()
-            .map(|step| match step {
+    fn plan_writes(&self, property: &str, value: Option<&Value>) -> bool {
+        self.steps.iter().any(|step| {
+            let (written, written_value) = match step {
                 DraftStep::Add {
-                    category,
-                    property,
+                    property: written,
                     value,
-                    confidence,
-                } => Step::Add {
-                    node_key: new_key(),
-                    fact: NewFact {
-                        category: *category,
-                        property: property.clone(),
-                        value: value.clone(),
-                    },
-                    confidence: *confidence,
-                },
-                DraftStep::Replace {
-                    number,
-                    value,
-                    confidence,
-                } => {
-                    let old = fact(*number);
-                    Step::Replace {
-                        old_key: old.node_key.clone(),
-                        node_key: new_key(),
-                        fact: NewFact {
-                            category: old.category,
-                            property: old.property.clone(),
-                            value: value.clone(),
-                        },
-                        confidence: *confidence,
-                    }
-                }
-                DraftStep::Remove { number, confidence } => Step::Remove {
-                    node_key: fact(*number).node_key.clone(),
-                    confidence: *confidence,
-                },
-            })
-            .collect();
-        Plan {
-            tenant_id,
-            subject_id,
-            origin,
-            profile_version: self.version,
-            steps,
-        }
+                    ..
+                } => (written, value),
+                DraftStep::Replace { old, value, .. } => (&old.property, value),
+                DraftStep::Remove { .. } => return false,
+            };
+            written == property && value.is_none_or(|value| same_value(written_value, value))
+        })
     }
-}
-
-fn arguments<T: DeserializeOwned>(arguments: &Value) -> Result<T, ToolRefusal> {
-    T::deserialize(arguments).map_err(|error| ToolRefusal::BadArguments(error.to_string()))
 }
 
 fn check_confidence(confidence: f64) -> Result<(), ToolRefusal> {
@@ -346,9 +237,11 @@ fn check_confidence(confidence: f64) -> Result<(), ToolRefusal> {
     }
 }
 
-fn shown(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
+fn same_value(stored: &Value, new: &Value) -> bool {
+    match (stored, new) {
+        (Value::String(stored), Value::String(new)) => {
+            stored.trim().to_lowercase() == new.trim().to_lowercase()
+        }
+        _ => stored == new,
     }
 }

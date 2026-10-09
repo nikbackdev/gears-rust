@@ -3,10 +3,14 @@ use std::collections::BTreeMap;
 use construct_sdk::person_types::{Cardinality, PERSON_TYPES, PROPERTIES};
 use jsonschema::{Draft, Validator};
 use serde_json::Value;
+use toolkit_macros::domain_model;
 
 use crate::domain::error::DomainError;
 use crate::domain::profile::Category;
 
+/// One property of the person types: its category, its cardinality and its schema.
+#[domain_model]
+#[derive(Debug)]
 pub struct PropertySpec {
     pub category: Category,
     pub cardinality: Cardinality,
@@ -15,6 +19,17 @@ pub struct PropertySpec {
 }
 
 impl PropertySpec {
+    /// The property's JSON schema in its person type.
+    #[must_use]
+    pub fn schema(&self) -> &Value {
+        &self.schema
+    }
+
+    /// Checks a value against the property's schema.
+    ///
+    /// # Errors
+    ///
+    /// The first rule the value breaks, followed by the schema the property takes.
     pub fn check(&self, value: &Value) -> Result<(), String> {
         match self.validator.iter_errors(value).next() {
             None => Ok(()),
@@ -23,11 +38,19 @@ impl PropertySpec {
     }
 }
 
+/// Every property of the person types, by name.
+#[domain_model]
+#[derive(Debug)]
 pub struct PropertyCatalog {
     properties: BTreeMap<&'static str, PropertySpec>,
 }
 
 impl PropertyCatalog {
+    /// Reads every property from the person types the SDK ships.
+    ///
+    /// # Errors
+    ///
+    /// [`DomainError::Internal`] when a person type does not parse or a property has no schema.
     pub fn load() -> Result<Self, DomainError> {
         let mut schemas = BTreeMap::new();
         for (type_id, json) in PERSON_TYPES {
@@ -71,11 +94,13 @@ impl PropertyCatalog {
         Ok(Self { properties })
     }
 
+    /// The property named `property`, or `None` when the person types have no such property.
     #[must_use]
     pub fn get(&self, property: &str) -> Option<&PropertySpec> {
         self.properties.get(property)
     }
 
+    /// The names of all properties, in alphabetical order.
     pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
         self.properties.keys().copied()
     }
