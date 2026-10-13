@@ -134,6 +134,8 @@ members = [
     "gears/system/types-registry/types-registry",
     "gears/simple-user-settings/simple-user-settings-sdk",
     "gears/simple-user-settings/simple-user-settings",
+    "gears/construct/construct-sdk",
+    "gears/construct/construct",
     "gears/settings-service/settings-service-sdk",
     "gears/settings-service/settings-service",
     "gears/system/tenant-resolver/tenant-resolver-sdk",
@@ -183,6 +185,7 @@ members = [
     "gears/bss/libs/coord",
     "gears/bss/libs/approval",
     "gears/bss/libs/rest",
+    "gears/bss/libs/money",
     "gears/system/event-broker/event-broker-sdk",
     "gears/system/event-broker/event-broker",
     "gears/system/license-resolver/license-resolver-sdk",
@@ -445,6 +448,8 @@ coord = { package = "cf-gears-bss-coord", path = "gears/bss/libs/coord" }
 bss-approval = { package = "cf-gears-bss-approval", path = "gears/bss/libs/approval" }
 # Weak ETag and If-None-Match for the BSS list and reference reads.
 bss-rest = { package = "cf-gears-bss-rest", path = "gears/bss/libs/rest" }
+# Validated decimal money in major units, exact arithmetic and canonical decimal text.
+bss-money = { package = "cf-gears-bss-money", version = "0.1.0", path = "gears/bss/libs/money" }
 # FIPS-validated SHA-256 for the ledger idempotency payload fingerprint.
 aws-lc-rs = "1.17"
 
