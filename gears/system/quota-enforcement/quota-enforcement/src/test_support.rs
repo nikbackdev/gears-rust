@@ -12,7 +12,9 @@
     reason = "test support"
 )]
 
+use crate::domain::ports::metrics::{EngineLabel, OperationKind, PolicyTransition, RetentionTable};
 use std::collections::{HashMap, HashSet};
+use std::future::pending;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -29,10 +31,13 @@ use cluster_sdk::{
     ClusterError, ClusterProfile, ElectionConfig, LeaderElectionBackend, LeaderElectionFeatures,
     LeaderStatus, LeaderWatch,
 };
-use gts::{GTS_ID_URI_PREFIX, GtsId, GtsInstanceId, GtsStore, GtsTypeId};
+use gts::{
+    GTS_ID_URI_PREFIX, GtsId, GtsInstanceId, GtsRefValidation, GtsStore, GtsTypeId,
+    X_GTS_INSTANCE_REF,
+};
 use quota_enforcement_sdk::testing::InMemoryStorage;
 use quota_enforcement_sdk::{
-    METRIC_BASE_TYPE, OwnedDefinition, QuotaEnforcementStoragePluginSpecV1,
+    METRIC_BASE_TYPE, MetricId, MetricKind, OwnedDefinition, QuotaEnforcementStoragePluginSpecV1,
     QuotaEnforcementStoragePluginV1, SCOPE_TENANT, SCOPE_TYPE, SCOPE_USER, TenantId,
     owned_definitions,
 };
@@ -45,10 +50,12 @@ use toolkit_canonical_errors::CanonicalError;
 use toolkit_security::{PlatformSecurityContext, SecurityContext, pep_properties};
 use types_registry::config::TypesRegistryConfig;
 use types_registry::domain::TypesRegistryService;
-use types_registry::domain::local_client::TypesRegistryLocalClient;
+use types_registry::domain::legacy_local_client::TypesRegistryLocalClient;
 use types_registry::infra::InMemoryGtsRepository;
 use types_registry_sdk::testing::{MockTypesRegistryClient, make_test_instance};
-use types_registry_sdk::{GtsInstance, GtsTypeSchema, RegisterResult, TypesRegistryClient};
+use types_registry_sdk::{
+    GtsInstance, GtsTypeSchema, InstanceQuery, RegisterResult, TypeSchemaQuery, TypesRegistryClient,
+};
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
@@ -56,8 +63,13 @@ use crate::domain::ports::contracts::{ContractRegistry, DiscoveredType, Register
 use crate::domain::ports::coordination::{
     CoordinatorBinding, LeaderWork, SingletonCoordinator, SingletonScope,
 };
+use crate::domain::ports::lifecycle_gauges::{LifecycleCounts, LifecycleGaugeSink};
+use crate::domain::ports::metric_registry::{
+    Classified, Freshness, MetricDescriptor, MetricMode, MetricRegistry,
+};
 use crate::domain::ports::metrics::{DenialReason, QeMetrics, ValidationReason, ValidationSurface};
 use crate::infra::cluster_coordination::QuotaEnforcementProfile;
+use crate::infra::metric_registry::contract as metric_contract;
 
 /// The tenant every fixture belongs to.
 pub fn tenant() -> TenantId {
@@ -312,14 +324,53 @@ pub fn register_pdp(hub: &Arc<ClientHub>, pdp: Arc<dyn AuthZResolverApi>) {
 /// Records every emission in order.
 #[derive(Default)]
 pub struct RecordingMetrics {
+    pub engine_bootstrap_failures: parking_lot::Mutex<Vec<EngineLabel>>,
+    pub engine_evaluations: parking_lot::Mutex<Vec<(EngineLabel, std::time::Duration)>>,
+    pub plan_violations: parking_lot::Mutex<
+        Vec<(
+            EngineLabel,
+            quota_enforcement_sdk::engine::DebitPlanInvariant,
+        )>,
+    >,
+    pub policy_transitions: parking_lot::Mutex<Vec<PolicyTransition>>,
+    pub policy_conflicts: parking_lot::Mutex<u64>,
     denials: Mutex<Vec<DenialReason>>,
     contract_failures: Mutex<Vec<(ValidationSurface, ValidationReason)>>,
     admitted_violations: Mutex<Vec<ValidationSurface>>,
+    evaluations: Mutex<Vec<(OperationKind, std::time::Duration)>>,
+    replays: Mutex<Vec<OperationKind>>,
+    reclaimed: Mutex<Vec<(RetentionTable, u64)>>,
+    retention_failures: Mutex<Vec<RetentionTable>>,
 }
 
 impl RecordingMetrics {
     pub fn denials(&self) -> Vec<DenialReason> {
         self.denials.lock().expect("lock").clone()
+    }
+
+    /// Operations whose latency was observed, in order.
+    pub fn evaluations(&self) -> Vec<OperationKind> {
+        self.evaluations
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|(operation, _)| *operation)
+            .collect()
+    }
+
+    /// Operations that answered from a stored record.
+    pub fn replays(&self) -> Vec<OperationKind> {
+        self.replays.lock().expect("lock").clone()
+    }
+
+    /// Rows reclaimed per table, in order.
+    pub fn reclaimed(&self) -> Vec<(RetentionTable, u64)> {
+        self.reclaimed.lock().expect("lock").clone()
+    }
+
+    /// Tables whose sweep failed.
+    pub fn retention_failures(&self) -> Vec<RetentionTable> {
+        self.retention_failures.lock().expect("lock").clone()
     }
 
     /// `contract_validation_failures_total` emissions as `(surface, reason)`.
@@ -334,6 +385,26 @@ impl RecordingMetrics {
 }
 
 impl QeMetrics for RecordingMetrics {
+    fn record_engine_bootstrap_failure(&self, engine: EngineLabel) {
+        self.engine_bootstrap_failures.lock().push(engine);
+    }
+    fn record_engine_evaluation(&self, engine: EngineLabel, elapsed: std::time::Duration) {
+        self.engine_evaluations.lock().push((engine, elapsed));
+    }
+    fn record_plan_violation(
+        &self,
+        engine: EngineLabel,
+        invariant: quota_enforcement_sdk::engine::DebitPlanInvariant,
+    ) {
+        self.plan_violations.lock().push((engine, invariant));
+    }
+    fn record_policy_transition(&self, transition: PolicyTransition) {
+        self.policy_transitions.lock().push(transition);
+    }
+    fn record_policy_conflict(&self) {
+        *self.policy_conflicts.lock() += 1;
+    }
+
     fn record_denial(&self, reason: DenialReason) {
         self.denials.lock().expect("lock").push(reason);
     }
@@ -351,6 +422,25 @@ impl QeMetrics for RecordingMetrics {
 
     fn record_admitted_metric_violation(&self, surface: ValidationSurface) {
         self.admitted_violations.lock().expect("lock").push(surface);
+    }
+
+    fn record_evaluation(&self, operation: OperationKind, elapsed: std::time::Duration) {
+        self.evaluations
+            .lock()
+            .expect("lock")
+            .push((operation, elapsed));
+    }
+
+    fn record_idempotency_replay(&self, operation: OperationKind) {
+        self.replays.lock().expect("lock").push(operation);
+    }
+
+    fn record_retention_reclaimed(&self, table: RetentionTable, rows: u64) {
+        self.reclaimed.lock().expect("lock").push((table, rows));
+    }
+
+    fn record_retention_failure(&self, table: RetentionTable) {
+        self.retention_failures.lock().expect("lock").push(table);
     }
 }
 
@@ -636,6 +726,31 @@ pub fn llm_gateway_documents() -> Vec<Value> {
         .collect()
 }
 
+/// A later publication of the token constraint contract.
+pub const LLM_TOKEN_CONSTRAINT_V2: &str =
+    "gts.cf.core.qe.constraint.v1~cf.genai.llm_gateway.token_constraint.v2~";
+
+/// The `llm_gateway` documents as a later deployment sees them: the token
+/// request contract attaches [`LLM_TOKEN_CONSTRAINT_V2`], published with the
+/// same body under the new id; the v1 contract stays registered.
+pub fn llm_gateway_documents_v2() -> Vec<Value> {
+    let mut documents = llm_gateway_documents();
+    let v1 = documents
+        .iter()
+        .find(|doc| document_id(doc) == LLM_TOKEN_CONSTRAINT)
+        .cloned()
+        .expect("token constraint example");
+    let mut v2 = v1;
+    v2["$id"] = Value::String(format!("{GTS_ID_URI_PREFIX}{LLM_TOKEN_CONSTRAINT_V2}"));
+    documents.push(v2);
+    for doc in &mut documents {
+        if doc["x-gts-traits"]["constraint_contract"] == json!(LLM_TOKEN_CONSTRAINT) {
+            doc["x-gts-traits"]["constraint_contract"] = json!(LLM_TOKEN_CONSTRAINT_V2);
+        }
+    }
+    documents
+}
+
 /// A permissive test-only metric base plus the two `llm_gateway` metrics. The
 /// platform base is registry-owned and defined nowhere in code yet.
 pub fn metric_base_documents() -> Vec<Value> {
@@ -656,8 +771,30 @@ pub fn metric_base_documents() -> Vec<Value> {
     ]
 }
 
-/// A metric instance under the test-only metric base.
+/// A metric instance under the test-only metric base, classified as a
+/// quota-gated counter (the provisional classification contract).
 pub fn metric_instance_document(id: &str) -> Value {
+    classified_metric_document(
+        id,
+        metric_contract::KIND_COUNTER,
+        metric_contract::ENFORCEMENT_QUOTA_GATED,
+    )
+}
+
+/// A metric instance under the test-only metric base with an explicit
+/// classification. `kind` and `enforcement` are written verbatim, so a test can
+/// register an unusable classification.
+pub fn classified_metric_document(id: &str, kind: &str, enforcement: &str) -> Value {
+    json!({
+        "id": id,
+        "type": METRIC_BASE_TYPE,
+        metric_contract::KIND: kind,
+        metric_contract::ENFORCEMENT: enforcement,
+    })
+}
+
+/// A metric instance under the test-only metric base without a classification.
+pub fn unclassified_metric_document(id: &str) -> Value {
     json!({ "id": id, "type": METRIC_BASE_TYPE })
 }
 
@@ -706,7 +843,7 @@ pub fn mixin_request_document(metric: &str) -> Value {
 }
 
 /// A request contract whose metadata declares a GTS-typed field narrowed by
-/// `x-gts-ref` and a `date-time` field.
+/// `x-gts-instance-ref` and a `date-time` field.
 pub fn typed_request_document(metric: &str) -> Value {
     json!({
         "$id": format!("{GTS_ID_URI_PREFIX}{TYPED_REQUEST}"),
@@ -724,8 +861,7 @@ pub fn typed_request_document(metric: &str) -> Value {
                         "properties": {
                             "model": {
                                 "type": "string",
-                                "format": "gts-instance-id",
-                                "x-gts-ref": TYPED_MODEL_BASE
+                                X_GTS_INSTANCE_REF: TYPED_MODEL_BASE
                             },
                             "when": { "type": "string", "format": "date-time" }
                         },
@@ -829,8 +965,8 @@ pub fn plugin_instance_document(fixture: &PluginFixture) -> Value {
 }
 
 /// Resolves `documents` the way the production adapter does: a local
-/// `GtsStore` holding the QE bases plus every document, then `validate_schema`
-/// per type document. Instances are skipped.
+/// `GtsStore` holding the QE bases plus every document, then validation with
+/// the registry's pattern-only entity-reference policy. Instances are skipped.
 pub fn resolve_documents(documents: &[Value]) -> Vec<RegisteredType> {
     let mut store = GtsStore::new();
     let mut ids = Vec::new();
@@ -846,7 +982,7 @@ pub fn resolve_documents(documents: &[Value]) -> Vec<RegisteredType> {
     ids.into_iter()
         .map(|id| {
             let resolved = store
-                .validate_schema(&id)
+                .validate_schema_with(&id, GtsRefValidation::None)
                 .unwrap_or_else(|e| panic!("{id}: {e}"));
             let mut ancestors: Vec<GtsTypeId> = GtsId::try_new(&id)
                 .expect("type id")
@@ -856,12 +992,14 @@ pub fn resolve_documents(documents: &[Value]) -> Vec<RegisteredType> {
                 .map(|c| GtsTypeId::new(&c))
                 .collect();
             ancestors.reverse();
+            let payload = resolved.compile_payload_validator();
             RegisteredType {
                 id: GtsTypeId::new(&id),
                 is_abstract: resolved.is_abstract,
                 ancestors,
                 effective_traits: resolved.effective_traits,
                 schema: resolved.schema,
+                payload,
             }
         })
         .collect()
@@ -890,8 +1028,18 @@ impl FakeContractRegistry {
 
     /// Holds the QE bases, the `llm_gateway` set, and the two metric instances.
     pub fn llm_gateway() -> Self {
+        Self::over(&llm_gateway_documents())
+    }
+
+    /// [`Self::llm_gateway`] after the token constraint moved to
+    /// [`LLM_TOKEN_CONSTRAINT_V2`].
+    pub fn llm_gateway_v2() -> Self {
+        Self::over(&llm_gateway_documents_v2())
+    }
+
+    fn over(documents: &[Value]) -> Self {
         let fake = Self::empty();
-        for registered in resolve_documents(&llm_gateway_documents()) {
+        for registered in resolve_documents(documents) {
             fake.add_type(registered);
         }
         for metric in [METRIC_TOKENS, METRIC_REQUESTS] {
@@ -1050,4 +1198,363 @@ pub fn type_ids(documents: &[Value]) -> HashSet<String> {
         .map(document_id)
         .filter(|id| id.ends_with('~'))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Metric registry and gauge doubles (quota-lifecycle)
+// ---------------------------------------------------------------------------
+
+/// The classifications of `METRIC_TOKENS` and `METRIC_REQUESTS` in every
+/// fixture: quota-gated counters.
+pub fn gated_counter() -> MetricDescriptor {
+    MetricDescriptor {
+        kind: MetricKind::Counter,
+        mode: MetricMode::QuotaGated,
+    }
+}
+
+/// An in-memory `MetricRegistry`: explicit classifications, staleness, removal,
+/// unavailability, and a hang, plus a call counter.
+#[derive(Default)]
+pub struct FakeMetricRegistry {
+    metrics: Mutex<HashMap<String, Classified>>,
+    invalid: Mutex<HashSet<String>>,
+    calls: AtomicUsize,
+    fail_all: AtomicBool,
+    hang: AtomicBool,
+}
+
+impl FakeMetricRegistry {
+    /// Knows no metric.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Knows the two `llm_gateway` metrics as fresh, quota-gated counters.
+    pub fn classified() -> Self {
+        let fake = Self::empty();
+        for metric in [METRIC_TOKENS, METRIC_REQUESTS] {
+            fake.add(metric, gated_counter());
+        }
+        fake
+    }
+
+    pub fn add(&self, id: &str, descriptor: MetricDescriptor) {
+        self.metrics.lock().expect("lock").insert(
+            id.to_owned(),
+            Classified {
+                descriptor,
+                freshness: Freshness::Fresh,
+            },
+        );
+    }
+
+    /// Reclassify `id`'s enforcement mode.
+    pub fn set_mode(&self, id: &str, mode: MetricMode) {
+        if let Some(entry) = self.metrics.lock().expect("lock").get_mut(id) {
+            entry.descriptor.mode = mode;
+        }
+    }
+
+    /// Mark `id`'s answer as served from a stale cache.
+    pub fn set_stale(&self, id: &str) {
+        if let Some(entry) = self.metrics.lock().expect("lock").get_mut(id) {
+            entry.freshness = Freshness::Stale;
+        }
+    }
+
+    /// Forget `id`: the registry no longer knows the metric.
+    pub fn remove(&self, id: &str) {
+        self.metrics.lock().expect("lock").remove(id);
+    }
+
+    /// `id` is registered but carries no usable classification.
+    pub fn set_invalid(&self, id: &str) {
+        self.invalid.lock().expect("lock").insert(id.to_owned());
+    }
+
+    /// Every later `describe` fails as unavailable.
+    pub fn fail_all(&self) {
+        self.fail_all.store(true, Ordering::SeqCst);
+    }
+
+    /// Answer again.
+    pub fn recover(&self) {
+        self.fail_all.store(false, Ordering::SeqCst);
+        self.hang.store(false, Ordering::SeqCst);
+    }
+
+    /// Every later `describe` never resolves.
+    pub fn hang(&self) {
+        self.hang.store(true, Ordering::SeqCst);
+    }
+
+    /// Number of `describe` calls, failures included.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl MetricRegistry for FakeMetricRegistry {
+    async fn describe(&self, metric: &MetricId) -> Result<Option<Classified>, DomainError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.hang.load(Ordering::SeqCst) {
+            pending::<()>().await;
+        }
+        if self.fail_all.load(Ordering::SeqCst) {
+            return Err(DomainError::TypesRegistryUnavailable(
+                "fake metric registry unavailable".to_owned(),
+            ));
+        }
+        if self.invalid.lock().expect("lock").contains(metric.as_str()) {
+            return Err(DomainError::MetricClassificationInvalid {
+                metric: metric.as_str().to_owned(),
+            });
+        }
+        Ok(self
+            .metrics
+            .lock()
+            .expect("lock")
+            .get(metric.as_str())
+            .copied())
+    }
+}
+
+/// Records every publication in order, withdrawals included.
+#[derive(Default)]
+pub struct RecordingGaugeSink {
+    publications: Mutex<Vec<Option<LifecycleCounts>>>,
+}
+
+impl RecordingGaugeSink {
+    pub fn publications(&self) -> Vec<Option<LifecycleCounts>> {
+        self.publications.lock().expect("lock").clone()
+    }
+
+    /// The most recent publication, if any happened: `Some(None)` is a
+    /// withdrawal, `None` means nothing was published yet.
+    #[allow(
+        clippy::option_option,
+        reason = "a withdrawal is a publication of nothing"
+    )]
+    pub fn last(&self) -> Option<Option<LifecycleCounts>> {
+        self.publications.lock().expect("lock").last().copied()
+    }
+}
+
+impl LifecycleGaugeSink for RecordingGaugeSink {
+    fn publish(&self, counts: Option<LifecycleCounts>) {
+        self.publications.lock().expect("lock").push(counts);
+    }
+}
+
+/// A `TypesRegistryClient` over a mock whose `get_instance` can be made to
+/// fail, for the cached adapter's unavailability paths. Every other method
+/// delegates.
+pub struct FailingInstanceRegistry {
+    inner: MockTypesRegistryClient,
+    fail_instances: AtomicBool,
+    instance_calls: AtomicUsize,
+}
+
+impl FailingInstanceRegistry {
+    pub fn new(inner: MockTypesRegistryClient) -> Self {
+        Self {
+            inner,
+            fail_instances: AtomicBool::new(false),
+            instance_calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Every later `get_instance` fails as unavailable.
+    pub fn fail_instances(&self) {
+        self.fail_instances.store(true, Ordering::SeqCst);
+    }
+
+    /// `get_instance` answers again.
+    pub fn recover(&self) {
+        self.fail_instances.store(false, Ordering::SeqCst);
+    }
+
+    /// Number of `get_instance` calls, failures included.
+    pub fn instance_calls(&self) -> usize {
+        self.instance_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl TypesRegistryClient for FailingInstanceRegistry {
+    async fn register(&self, entities: Vec<Value>) -> Result<Vec<RegisterResult>, CanonicalError> {
+        self.inner.register(entities).await
+    }
+
+    async fn register_type_schemas(
+        &self,
+        type_schemas: Vec<Value>,
+    ) -> Result<Vec<RegisterResult>, CanonicalError> {
+        self.inner.register_type_schemas(type_schemas).await
+    }
+
+    async fn get_type_schema(&self, type_id: &str) -> Result<GtsTypeSchema, CanonicalError> {
+        self.inner.get_type_schema(type_id).await
+    }
+
+    async fn get_type_schema_by_uuid(
+        &self,
+        type_uuid: Uuid,
+    ) -> Result<GtsTypeSchema, CanonicalError> {
+        self.inner.get_type_schema_by_uuid(type_uuid).await
+    }
+
+    async fn get_type_schemas(
+        &self,
+        type_ids: Vec<String>,
+    ) -> HashMap<String, Result<GtsTypeSchema, CanonicalError>> {
+        self.inner.get_type_schemas(type_ids).await
+    }
+
+    async fn get_type_schemas_by_uuid(
+        &self,
+        type_uuids: Vec<Uuid>,
+    ) -> HashMap<Uuid, Result<GtsTypeSchema, CanonicalError>> {
+        self.inner.get_type_schemas_by_uuid(type_uuids).await
+    }
+
+    async fn list_type_schemas(
+        &self,
+        query: TypeSchemaQuery,
+    ) -> Result<Vec<GtsTypeSchema>, CanonicalError> {
+        self.inner.list_type_schemas(query).await
+    }
+
+    async fn register_instances(
+        &self,
+        instances: Vec<Value>,
+    ) -> Result<Vec<RegisterResult>, CanonicalError> {
+        self.inner.register_instances(instances).await
+    }
+
+    async fn get_instance(&self, id: &str) -> Result<GtsInstance, CanonicalError> {
+        self.instance_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_instances.load(Ordering::SeqCst) {
+            return Err(CanonicalError::service_unavailable()
+                .with_detail("registry down")
+                .create());
+        }
+        self.inner.get_instance(id).await
+    }
+
+    async fn get_instance_by_uuid(&self, uuid: Uuid) -> Result<GtsInstance, CanonicalError> {
+        self.inner.get_instance_by_uuid(uuid).await
+    }
+
+    async fn get_instances(
+        &self,
+        ids: Vec<String>,
+    ) -> HashMap<String, Result<GtsInstance, CanonicalError>> {
+        self.inner.get_instances(ids).await
+    }
+
+    async fn get_instances_by_uuid(
+        &self,
+        uuids: Vec<Uuid>,
+    ) -> HashMap<Uuid, Result<GtsInstance, CanonicalError>> {
+        self.inner.get_instances_by_uuid(uuids).await
+    }
+
+    async fn list_instances(
+        &self,
+        query: InstanceQuery,
+    ) -> Result<Vec<GtsInstance>, CanonicalError> {
+        self.inner.list_instances(query).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A bound service for the transport tests (REST, in-process)
+// ---------------------------------------------------------------------------
+
+/// The lifecycle bounds every transport test runs with.
+pub fn test_limits() -> crate::domain::quotas::QuotaLimits {
+    crate::domain::quotas::QuotaLimits {
+        metadata_max_bytes: 4096,
+        list_max_limit: 500,
+        list_max_ids: 100,
+    }
+}
+
+/// The configured policy bounds every test runs with: the shipped defaults.
+pub fn policy_limits() -> crate::domain::policies::PolicyRuntimeLimits {
+    crate::config::PoliciesSection::default()
+        .to_limits()
+        .expect("the default policy section is valid")
+}
+
+/// A service whose dependencies are not bound: every lifecycle call is
+/// `NotReady`.
+pub fn unbound_service(pdp: Arc<dyn AuthZResolverApi>) -> Arc<crate::domain::Service> {
+    let metrics = Arc::new(RecordingMetrics::default());
+    Arc::new(crate::domain::Service::new(
+        crate::domain::Admission::new(authz_resolver_sdk::PolicyEnforcer::new(pdp), metrics),
+        Arc::new(crate::domain::Readiness::new()),
+        test_limits(),
+        policy_limits(),
+        crate::domain::service::OperationsRuntime {
+            cache_entries: 16,
+            cache_ttl: std::time::Duration::from_secs(5),
+            preparation_max_attempts: std::num::NonZeroU32::new(3).expect("attempts"),
+        },
+    ))
+}
+
+/// A service bound to the in-memory storage, the `llm_gateway` catalogue with
+/// both subject projections, and classified metrics.
+pub async fn bound_service(pdp: Arc<dyn AuthZResolverApi>) -> Arc<crate::domain::Service> {
+    bound_service_over(pdp, Arc::new(InMemoryStorage::new())).await
+}
+
+/// The same service over a caller-supplied storage double, so a test can seed
+/// Quotas and read counters through it.
+pub async fn bound_service_over(
+    pdp: Arc<dyn AuthZResolverApi>,
+    storage: Arc<InMemoryStorage>,
+) -> Arc<crate::domain::Service> {
+    let service = unbound_service(pdp);
+    let registry = Arc::new(FakeContractRegistry::llm_gateway());
+    let metrics = RecordingMetrics::default();
+    let catalog = crate::domain::catalog::CatalogBuilder::new(registry.as_ref(), &metrics)
+        .build(&crate::domain::catalog::CatalogConfig {
+            subject_projections: vec![
+                GtsTypeId::new(LLM_USER_PROJECTION),
+                GtsTypeId::new(LLM_TENANT_PROJECTION),
+            ],
+            resource_projections: Vec::new(),
+        })
+        .await
+        .expect("catalogue");
+    service
+        .bind(crate::domain::Bound {
+            engines: Arc::new(crate::domain::engines::linked_registry().expect("engines")),
+            artifacts: Arc::new(crate::domain::engines::PolicyArtifactCache::new(
+                std::num::NonZeroUsize::new(256).expect("capacity"),
+                std::num::NonZeroUsize::new(2).expect("permits"),
+            )),
+            storage,
+            coordinator: Arc::new(NoopCoordinator),
+            catalog: Arc::new(catalog),
+            registry,
+            metric_registry: Arc::new(FakeMetricRegistry::classified()),
+            classifications: Arc::new(crate::domain::catalog::MetricClassifications::from_pairs([
+                (
+                    quota_enforcement_sdk::MetricId::parse(METRIC_TOKENS).expect("metric"),
+                    crate::domain::ports::metric_registry::MetricDescriptor {
+                        kind: quota_enforcement_sdk::MetricKind::Counter,
+                        mode: crate::domain::ports::metric_registry::MetricMode::QuotaGated,
+                    },
+                ),
+            ])),
+        })
+        .expect("bind");
+    service
 }

@@ -1,4 +1,3 @@
-// Created: 2026-08-13 by Virtuozzo International GmbH
 //! Category operations.
 //!
 //! Generic over the repository rather than holding a trait object: the
@@ -170,7 +169,7 @@ impl<R: CategoryRepository, S: AuditSink> CategoryService<R, S> {
         conn: &C,
         scope: &AccessScope,
         query: &toolkit_odata::ODataQuery,
-    ) -> Result<toolkit_odata::Page<Category>, DomainError> {
+    ) -> Result<crate::domain::odata::Listing<Category>, DomainError> {
         crate::domain::odata::reject_unsupported_options(query, "categories")?;
         crate::domain::odata::reject_unsortable::<crate::domain::odata::CategoryOrderField>(
             query,

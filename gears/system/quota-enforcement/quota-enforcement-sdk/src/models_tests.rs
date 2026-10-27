@@ -6,11 +6,14 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::{
-    CapPatch, ContractRef, Decision, DecisionResult, EnforcementMode, EvaluationAttribution,
-    IdempotencySubjectKey, LeaseState, MetricId, NotificationEventKind, OperationType, PageRequest,
-    PageResult, PeriodType, PolicyId, PolicyScope, ProjectionBinding, QuotaDebitPlan, QuotaId,
-    QuotaPatch, QuotaSource, QuotaType, ResourceProjection, ScopeError, SubjectRef, SubjectScope,
-    UnknownValue, ValidityWindow,
+    ActiveQuotaCounts, AttributionDigest, CapPatch, ContractRef, DECISION_BLOB_VERSION,
+    DebitRequest, Decision, DecisionPreview, DecisionResult, EnforcementMode,
+    EvaluationAttribution, IdempotencyRecord, IdempotencyScope, IdempotencySubjectKey, LeaseState,
+    MetricId, MetricKind, NO_APPLICABLE_QUOTA, NotificationEventKind, OperationType, PageRequest,
+    PageResult, PartialIdempotencyWrite, PayloadHash, PeriodType, PolicyId, PolicyScope,
+    ProjectionBinding, Quota, QuotaDebitPlan, QuotaDraft, QuotaId, QuotaPatch, QuotaSource,
+    QuotaSpec, QuotaStatus, QuotaType, QuotaView, ResourceProjection, Retention, ScopeError,
+    SubjectRef, SubjectScope, TenantId, UnknownValue, ValidityWindow, positive_amount,
 };
 use crate::gts::{SCOPE_TENANT, SCOPE_TYPE, SCOPE_USER};
 
@@ -553,4 +556,475 @@ fn projection_bindings_are_distinct_by_pair() {
     .into_iter()
     .collect();
     assert_eq!(set.len(), 2);
+}
+
+// --- quota-lifecycle read and create shapes ---------------------------------
+
+fn spec() -> QuotaSpec {
+    QuotaSpec {
+        tenant_id: TenantId::new(Uuid::from_u128(7)),
+        subject: SubjectRef {
+            projection_type: GtsTypeId::new("gts.cf.core.qe.subj.v1~cf.genai.llm_gateway.user.v1~"),
+            subject_id: "u1".to_owned(),
+        },
+        metric: MetricId::parse(
+            "gts.cf.core.qe.metric_type.v1~cf.genai.llm_gateway.ai_tokens_input.v1",
+        )
+        .expect("metric"),
+        quota_type: QuotaType::Consumption,
+        period: Some(PeriodType::Month),
+        enforcement_mode: EnforcementMode::Hard,
+        cap: Some(10),
+        notification_thresholds: vec![50, 90],
+        validity_window: None,
+        fail_open_hint: false,
+        metadata: serde_json::Map::new(),
+        source: QuotaSource::Operator,
+    }
+}
+
+fn contract() -> ContractRef {
+    ContractRef {
+        type_id: GtsTypeId::new(
+            "gts.cf.core.qe.constraint.v1~cf.genai.llm_gateway.token_constraint.v1~",
+        ),
+        version: 1,
+    }
+}
+
+fn stored(spec: QuotaSpec, window: Option<ValidityWindow>) -> Quota {
+    let draft = QuotaDraft::from_spec(spec, contract());
+    Quota {
+        id: QuotaId::new(Uuid::from_u128(1)),
+        tenant_id: draft.tenant_id,
+        subject: draft.subject,
+        metric: draft.metric,
+        quota_type: draft.quota_type,
+        period: draft.period,
+        enforcement_mode: draft.enforcement_mode,
+        cap: draft.cap,
+        notification_thresholds: draft.notification_thresholds,
+        validity_window: window,
+        fail_open_hint: draft.fail_open_hint,
+        metadata: draft.metadata,
+        source: draft.source,
+        status: QuotaStatus::Active,
+        constraint_contract: draft.constraint_contract,
+        record_version: 1,
+        created_at: ts(0),
+        updated_at: ts(0),
+    }
+}
+
+#[test]
+fn quota_view_is_computed_for_one_instant_and_flattens_the_record() {
+    let window = ValidityWindow {
+        start: Some(ts(100)),
+        end: Some(ts(200)),
+    };
+    let quota = stored(spec(), Some(window));
+    let inside = QuotaView::compute(quota.clone(), Some(MetricKind::Counter), ts(150));
+    assert!(inside.currently_within_window);
+    assert_eq!(inside.metric_kind, Some(MetricKind::Counter));
+    let after = QuotaView::compute(quota.clone(), None, ts(201));
+    assert!(
+        !after.currently_within_window,
+        "past the end, status untouched"
+    );
+    assert_eq!(after.quota.status, QuotaStatus::Active);
+    let unbounded = QuotaView::compute(stored(spec(), None), Some(MetricKind::Gauge), ts(0));
+    assert!(unbounded.currently_within_window);
+
+    let value = serde_json::to_value(&inside).expect("serialize");
+    assert_eq!(
+        value["id"],
+        json!(quota.id.to_string()),
+        "record fields are flattened"
+    );
+    assert_eq!(value["currently_within_window"], json!(true));
+    assert_eq!(value["metric_kind"], json!("counter"));
+    let back: QuotaView = serde_json::from_value(value).expect("round trip");
+    assert_eq!(back, inside);
+}
+
+#[test]
+fn metric_kind_is_closed_and_snake_case() {
+    assert_eq!(
+        serde_json::to_value(MetricKind::Gauge).expect("serialize"),
+        json!("gauge")
+    );
+    assert_eq!(
+        serde_json::from_value::<MetricKind>(json!("counter")).expect("counter"),
+        MetricKind::Counter
+    );
+    assert!(serde_json::from_value::<MetricKind>(json!("histogram")).is_err());
+}
+
+#[test]
+fn quota_spec_has_no_contract_field_and_becomes_a_draft_with_one() {
+    let spec = spec();
+    let value = serde_json::to_value(&spec).expect("serialize");
+    assert!(value.get("constraint_contract").is_none());
+    let mut with_contract = value;
+    with_contract["constraint_contract"] = json!({ "type_id": "x", "version": 1 });
+    assert!(
+        serde_json::from_value::<QuotaSpec>(with_contract).is_err(),
+        "a caller cannot smuggle the contract in"
+    );
+    let draft = QuotaDraft::from_spec(spec.clone(), contract());
+    assert_eq!(draft.constraint_contract, contract());
+    assert_eq!(draft.metric, spec.metric);
+    assert_eq!(draft.notification_thresholds, vec![50, 90]);
+}
+
+#[test]
+fn max_cap_is_the_largest_signed_64_bit_value() {
+    assert_eq!(Quota::MAX_CAP, 9_223_372_036_854_775_807);
+    assert_eq!(i64::try_from(Quota::MAX_CAP), Ok(i64::MAX));
+}
+
+#[test]
+fn active_quota_counts_default_to_zero_and_round_trip() {
+    let mut counts = ActiveQuotaCounts::default();
+    assert_eq!((counts.cap_zero, counts.cap_unbounded), (0, 0));
+    counts.cap_zero = 2;
+    counts.by_metric.insert(
+        MetricId::parse("gts.cf.core.qe.metric_type.v1~cf.genai.llm_gateway.ai_tokens_input.v1")
+            .expect("metric"),
+        3,
+    );
+    let value = serde_json::to_value(&counts).expect("serialize");
+    let back: ActiveQuotaCounts = serde_json::from_value(value).expect("round trip");
+    assert_eq!(back, counts);
+}
+
+#[test]
+fn notification_event_kind_names_equal_their_serialized_form() {
+    for kind in [
+        NotificationEventKind::ThresholdCrossed,
+        NotificationEventKind::PeriodRollover,
+        NotificationEventKind::LeaseAutoReleased,
+        NotificationEventKind::LeaseResolvedByDeactivation,
+        NotificationEventKind::QuotaChanged,
+        NotificationEventKind::QuotaCounterAdjusted,
+        NotificationEventKind::QuotaRollbackApplied,
+        NotificationEventKind::PolicyChanged,
+    ] {
+        assert_eq!(
+            serde_json::to_value(kind).expect("serialize"),
+            json!(kind.as_str())
+        );
+    }
+}
+
+#[test]
+fn public_policy_inputs_reject_server_owned_fields() {
+    let create =
+        json!({"scope":{"kind":"global"},"engine_id":"most-restrictive-wins","engine_config":{}});
+    let patch = json!({"if_match_version":1,"timeout_ms":8});
+    assert!(serde_json::from_value::<super::PolicySpec>(create.clone()).is_ok());
+    assert!(serde_json::from_value::<super::PolicyPatch>(patch.clone()).is_ok());
+    for field in [
+        "created_by",
+        "schemas",
+        "schema_snapshot",
+        "compiled_artifact",
+    ] {
+        let mut spoofed = create.clone();
+        spoofed[field] = json!("caller controlled");
+        assert!(serde_json::from_value::<super::PolicySpec>(spoofed).is_err());
+        let mut spoofed = patch.clone();
+        spoofed[field] = json!("caller controlled");
+        assert!(serde_json::from_value::<super::PolicyPatch>(spoofed).is_err());
+    }
+}
+
+// --- digests ---------------------------------------------------------------
+
+fn subject(projection: &str, id: &str) -> SubjectRef {
+    SubjectRef {
+        projection_type: GtsTypeId::new(projection),
+        subject_id: id.to_owned(),
+    }
+}
+
+#[test]
+fn a_subject_key_ignores_the_order_and_multiplicity_of_its_pairs() {
+    let tenant = subject("gts.cf.core.qe.subj.v1~acme.tenant.v1", "t-1");
+    let user = subject("gts.cf.core.qe.subj.v1~acme.user.v1", "u-9");
+
+    let one = IdempotencySubjectKey::of(&[tenant.clone(), user.clone()]);
+    let other = IdempotencySubjectKey::of(&[user, tenant.clone(), tenant]);
+
+    assert_eq!(one, other);
+}
+
+#[test]
+fn a_subject_key_separates_fields_that_would_otherwise_concatenate_alike() {
+    let split_one = IdempotencySubjectKey::of(&[subject("gts.cf.core.qe.subj.v1~a.xy.v1", "z")]);
+    let split_other = IdempotencySubjectKey::of(&[subject("gts.cf.core.qe.subj.v1~a.x.v1", "yz")]);
+
+    assert_ne!(
+        split_one, split_other,
+        "length prefixes keep the encoding injective"
+    );
+}
+
+#[test]
+fn different_subject_sets_fingerprint_differently() {
+    let one = IdempotencySubjectKey::of(&[subject("gts.cf.core.qe.subj.v1~acme.tenant.v1", "t-1")]);
+    let other =
+        IdempotencySubjectKey::of(&[subject("gts.cf.core.qe.subj.v1~acme.tenant.v1", "t-2")]);
+
+    assert_ne!(one, other);
+}
+
+#[test]
+fn the_empty_subject_set_still_fingerprints_deterministically() {
+    assert_eq!(
+        IdempotencySubjectKey::of(&[]),
+        IdempotencySubjectKey::of(&[])
+    );
+}
+
+#[test]
+fn a_subject_key_is_pinned_to_its_byte_form() {
+    // Golden vector: one pair, each field length-prefixed big-endian.
+    let expected = {
+        use aws_lc_rs::digest::{Context, SHA256};
+        let mut hasher = Context::new(&SHA256);
+        for field in ["gts.cf.core.qe.subj.v1~acme.tenant.v1", "t-1"] {
+            hasher.update(
+                &u32::try_from(field.len())
+                    .expect("short field")
+                    .to_be_bytes(),
+            );
+            hasher.update(field.as_bytes());
+        }
+        {
+            let digest = hasher.finish();
+            let mut bytes = [0; 32];
+            bytes.copy_from_slice(digest.as_ref());
+            IdempotencySubjectKey::from_bytes(bytes)
+        }
+    };
+
+    assert_eq!(
+        IdempotencySubjectKey::of(&[subject("gts.cf.core.qe.subj.v1~acme.tenant.v1", "t-1")]),
+        expected
+    );
+}
+
+#[test]
+fn a_payload_hash_ignores_key_insertion_order_at_every_depth() {
+    let one = json!({"b": 1, "a": {"y": 2, "x": 3}});
+    let other = json!({"a": {"x": 3, "y": 2}, "b": 1});
+
+    assert_eq!(
+        PayloadHash::of_canonical(&one).expect("serializable"),
+        PayloadHash::of_canonical(&other).expect("serializable")
+    );
+}
+
+#[test]
+fn a_payload_hash_respects_array_order_which_carries_meaning() {
+    let one = json!({"subjects": ["a", "b"]});
+    let other = json!({"subjects": ["b", "a"]});
+
+    assert_ne!(
+        PayloadHash::of_canonical(&one).expect("serializable"),
+        PayloadHash::of_canonical(&other).expect("serializable")
+    );
+}
+
+#[test]
+fn a_payload_hash_distinguishes_the_amount_it_covers() {
+    let one = json!({"amount": 1});
+    let other = json!({"amount": 2});
+
+    assert_ne!(
+        PayloadHash::of_canonical(&one).expect("serializable"),
+        PayloadHash::of_canonical(&other).expect("serializable")
+    );
+}
+
+#[test]
+fn an_attribution_digest_is_canonical_in_the_same_way() {
+    let one = json!({"metric": "m", "subjects": [{"kind": "tenant", "id": "t-1"}]});
+    let other = json!({"subjects": [{"id": "t-1", "kind": "tenant"}], "metric": "m"});
+
+    assert_eq!(
+        AttributionDigest::of_canonical(&one).expect("serializable"),
+        AttributionDigest::of_canonical(&other).expect("serializable")
+    );
+    assert_ne!(
+        AttributionDigest::of_canonical(&one)
+            .expect("serializable")
+            .to_hex(),
+        AttributionDigest::of_canonical(&json!({"metric": "other"}))
+            .expect("serializable")
+            .to_hex()
+    );
+}
+
+// --- consumer requests -----------------------------------------------------
+
+#[test]
+fn a_debit_request_ignores_decision_shaped_fields_a_caller_echoed_back() {
+    let request: DebitRequest = serde_json::from_value(json!({
+        "attribution": {
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
+            "metric": "gts.cf.core.qe.metric_type.v1~acme.tokens.v1",
+            "subjects": [{"kind": "gts.cf.core.qe.scope.v1~cf.core.qe.tenant.v1", "id": "t-1"}],
+            "metadata": {}
+        },
+        "amount": 5,
+        "idempotency_key": "k-1",
+        "result": {"outcome": "allowed"},
+        "debit_plan": {},
+        "diagnostics": {"engine": "noise"}
+    }))
+    .expect("server-derived fields are ignored, never rejected");
+
+    assert_eq!(request.amount, 5);
+    assert_eq!(request.idempotency_key, "k-1");
+}
+
+#[test]
+fn an_attribution_inside_a_request_keeps_rejecting_its_own_unknown_fields() {
+    let error = serde_json::from_value::<DebitRequest>(json!({
+        "attribution": {
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
+            "metric": "gts.cf.core.qe.metric_type.v1~acme.tokens.v1",
+            "subjects": [],
+            "metadata": {},
+            "tenant": "typo"
+        },
+        "amount": 5,
+        "idempotency_key": "k-1"
+    }))
+    .expect_err("a misspelled attribution field is still an error");
+
+    assert!(error.to_string().contains("tenant"), "{error}");
+}
+
+#[test]
+fn a_signed_amount_reaches_the_domain_instead_of_failing_deserialization() {
+    let request: DebitRequest = serde_json::from_value(json!({
+        "attribution": {
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
+            "metric": "gts.cf.core.qe.metric_type.v1~acme.tokens.v1",
+            "subjects": [],
+            "metadata": {}
+        },
+        "amount": -3,
+        "idempotency_key": "k-1"
+    }))
+    .expect("a negative amount parses so the domain can answer INVALID_AMOUNT");
+
+    assert_eq!(request.amount, -3);
+    assert_eq!(positive_amount(request.amount), None);
+    assert_eq!(positive_amount(0), None);
+    assert_eq!(positive_amount(7), Some(7));
+    assert_eq!(positive_amount(i64::MAX), Some(9_223_372_036_854_775_807));
+}
+
+#[test]
+fn a_preview_flattens_the_decision_next_to_its_marker() {
+    let preview = DecisionPreview::of(Decision::allowed_with_plan(BTreeMap::new()));
+
+    let value = serde_json::to_value(&preview).expect("serializable");
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+
+    assert_eq!(
+        keys,
+        vec!["debit_plan", "diagnostics", "preview", "result"],
+        "the decision is flattened next to the marker, adding no envelope"
+    );
+    assert_eq!(value["preview"], json!(true));
+}
+
+// --- idempotency records ---------------------------------------------------
+
+#[test]
+fn a_partial_write_completes_into_the_scope_the_transaction_derived() {
+    let partial = PartialIdempotencyWrite {
+        tenant_id: TenantId::new(Uuid::from_u128(1)),
+        key: "k-1".to_owned(),
+        payload_hash: PayloadHash::of_canonical(&json!({"amount": 5})).expect("serializable"),
+    };
+    let subject_key =
+        IdempotencySubjectKey::of(&[subject("gts.cf.core.qe.subj.v1~acme.tenant.v1", "t-1")]);
+
+    let write = partial.clone().complete(subject_key, OperationType::Credit);
+
+    assert_eq!(write.scope.tenant_id, TenantId::new(Uuid::from_u128(1)));
+    assert_eq!(write.scope.subject_key, subject_key);
+    assert_eq!(write.scope.operation_type, OperationType::Credit);
+    assert_eq!(write.scope.key, "k-1");
+    assert_eq!(write.payload_hash, partial.payload_hash);
+}
+
+#[test]
+fn a_versioned_blob_decodes_into_the_decision_it_recorded() {
+    let record = IdempotencyRecord {
+        scope: IdempotencyScope {
+            tenant_id: TenantId::new(Uuid::from_u128(1)),
+            subject_key: IdempotencySubjectKey::of(&[]),
+            operation_type: OperationType::Debit,
+            key: "k-1".to_owned(),
+        },
+        payload_hash: PayloadHash::of_canonical(&json!({})).expect("serializable"),
+        decision_blob: json!({
+            "__version": DECISION_BLOB_VERSION,
+            "result": {"outcome": "allowed"},
+            "debit_plan": {},
+            "diagnostics": {}
+        }),
+        engine_id: None,
+        policy_id: None,
+        policy_version: None,
+        attribution_hash: None,
+        created_at: ts(0),
+        expires_at: ts(86_400),
+    };
+
+    let decision = record.decision().expect("the blob decodes");
+
+    assert_eq!(decision.result, DecisionResult::Allowed);
+    assert_eq!(decision.denied_reason(), None);
+}
+
+#[test]
+fn a_denial_reports_its_reason_and_whether_it_records_anything() {
+    let denied = Decision {
+        result: DecisionResult::Denied {
+            violated_quota_ids: Vec::new(),
+            reason: NO_APPLICABLE_QUOTA.to_owned(),
+        },
+        debit_plan: BTreeMap::new(),
+        diagnostics: BTreeMap::new(),
+    };
+
+    assert_eq!(denied.denied_reason(), Some(NO_APPLICABLE_QUOTA));
+    assert!(denied.is_no_applicable_quota());
+    assert!(!Decision::allowed_with_plan(BTreeMap::new()).is_no_applicable_quota());
+}
+
+#[test]
+fn retention_reports_the_deadline_only_when_something_was_recorded() {
+    assert_eq!(
+        Retention::Recorded {
+            expires_at: ts(86_400)
+        }
+        .expires_at(),
+        Some(ts(86_400))
+    );
+    assert_eq!(Retention::Unrecorded.expires_at(), None);
 }

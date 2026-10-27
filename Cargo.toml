@@ -67,6 +67,7 @@ members = [
     "libs/toolkit-gts",
     "libs/toolkit-gts-macros",
     "libs/toolkit-http",
+    "libs/toolkit-http-proxy",
     "libs/toolkit-trace-context",
     "libs/toolkit-http-middleware",
     "libs/toolkit-gateway",
@@ -80,6 +81,7 @@ members = [
     "libs/toolkit-stable-hash",
     "libs/toolkit-transport-grpc",
     "libs/toolkit-taskward",
+    "libs/toolkit-durable-execution",
     "libs/toolkit-utils",
     "libs/ai/toolkit-onnx-runtime",
     "libs/rustls-corecrypto-provider",
@@ -92,6 +94,8 @@ members = [
     "libs/system-sdks/sdks/directory",
     "gears/credstore/credstore-sdk",
     "gears/credstore/credstore",
+    "gears/credstore/v2/credstore-sdk",
+    "gears/credstore/v2/credstore",
     "gears/credstore/plugins/static-credstore-plugin",
     "gears/graph-storage/graph-storage-sdk",
     "gears/graph-storage/graph-storage",
@@ -103,6 +107,7 @@ members = [
     "gears/file-storage/file-storage",
     "gears/github-mirror/github-mirror-sdk",
     "gears/github-mirror/github-mirror",
+    "gears/github-mirror/github-mirror-cli",
     "gears/system/account-management/account-management",
     "gears/system/account-management/account-management-sdk",
     "gears/system/account-management/plugins/static-idp-plugin",
@@ -161,6 +166,8 @@ members = [
     "gears/system/quota-enforcement/quota-enforcement-sdk",
     "gears/system/quota-enforcement/quota-enforcement",
     "gears/system/quota-enforcement/plugins/quota-enforcement-storage-plugin",
+    "gears/system/quota-enforcement/plugins/quota-enforcement-engine-most-restrictive",
+    "gears/system/quota-enforcement/plugins/quota-enforcement-engine-cel",
     "gears/mini-chat/mini-chat-sdk",
     "gears/mini-chat/mini-chat",
     "examples/toolkit/api-contracts/api-contracts-sdk",
@@ -194,6 +201,8 @@ members = [
     "gears/system/event-broker/plugins/sqlite-event-broker-plugin",
     "gears/system/admission-control/admission-control-sdk",
     "gears/system/admission-control/admission-control",
+    "gears/system/policy-engine/policy-engine-sdk",
+    "gears/system/policy-engine/policy-engine",
 ]
 exclude = ["tools/fuzz"]
 resolver = "3"
@@ -326,14 +335,22 @@ string_lit_as_bytes = "deny"
 verbose_file_reads = "deny"
 
 [workspace.dependencies]
+cel-core = "=0.5.1"
+quota-enforcement-engine-cel = { package = "cf-gears-quota-enforcement-engine-cel", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-engine-cel" }
+apalis = { version = "=1.0.0-rc.10", default-features = false, features = ["tracing", "limit"] }
+apalis-core = "=1.0.0-rc.10"
+# Keep SQLx runtime/TLS settings in the workspace. The adapter's default
+# tokio-comp feature enables rustls/ring alongside our aws-lc-rs provider.
+apalis-postgres = { version = "=1.0.0-rc.9", default-features = false, features = ["migrate"] }
 # libs
 toolkit = { package = "cf-gears-toolkit", version = "0.10.0", path = "libs/toolkit" }
 toolkit-http = { package = "cf-gears-toolkit-http", version = "0.6.18", path = "libs/toolkit-http" }
+toolkit-http-proxy = { package = "cf-gears-toolkit-http-proxy", version = "0.1.0", path = "libs/toolkit-http-proxy" }
 toolkit-trace-context = { package = "cf-gears-toolkit-trace-context", version = "0.1.0", path = "libs/toolkit-trace-context" }
 toolkit-http-middleware = { package = "cf-gears-toolkit-http-middleware", version = "0.3.2", path = "libs/toolkit-http-middleware" }
 toolkit-gateway = { package = "cf-gears-toolkit-gateway", version = "0.2.8", path = "libs/toolkit-gateway" }
 toolkit-k8s-auth = { package = "cf-gears-toolkit-k8s-auth", version = "0.3.0", path = "libs/toolkit-k8s-auth" }
-toolkit-auth = { package = "cf-gears-toolkit-auth", version = "0.7.11", path = "libs/toolkit-auth" }
+toolkit-auth = { package = "cf-gears-toolkit-auth", version = "0.8.0", path = "libs/toolkit-auth" }
 toolkit-canonical-errors = { package = "cf-gears-toolkit-canonical-errors", version = "0.9.5", path = "libs/toolkit-canonical-errors" }
 toolkit-canonical-errors-macro = { package = "cf-gears-toolkit-canonical-errors-macro", version = "0.6.4", path = "libs/toolkit-canonical-errors-macro" }
 toolkit-db = { package = "cf-gears-toolkit-db", version = "0.16.2", path = "libs/toolkit-db" }
@@ -353,6 +370,7 @@ toolkit-security = { package = "cf-gears-toolkit-security", version = "0.11.0", 
 toolkit-stable-hash = { package = "cf-gears-toolkit-stable-hash", version = "0.1.0", path = "libs/toolkit-stable-hash" }
 toolkit-transport-grpc = { package = "cf-gears-toolkit-transport-grpc", version = "0.9.0", path = "libs/toolkit-transport-grpc" }
 toolkit-taskward = { package = "cf-gears-toolkit-taskward", version = "0.1.0", path = "libs/toolkit-taskward" }
+toolkit-durable-execution = { package = "cf-gears-toolkit-durable-execution", version = "0.1.0", path = "libs/toolkit-durable-execution" }
 toolkit-utils = { package = "cf-gears-toolkit-utils", version = "0.7.2", path = "libs/toolkit-utils" }
 toolkit-onnx-runtime = { package = "cf-gears-toolkit-onnx-runtime", version = "0.1.0", path = "libs/ai/toolkit-onnx-runtime" }
 rustls-corecrypto-provider = { package = "cf-gears-rustls-corecrypto-provider", version = "0.1.3", path = "libs/rustls-corecrypto-provider" }
@@ -368,8 +386,8 @@ rustls-cng-crypto = { version = "0.1", default-features = false, features = ["fi
 # field of SEC1 (rather than derived from the scalar in non-FIPS code),
 # preserving the FIPS-validated boundary at corecrypto for every
 # cryptographic operation. See ADR 0004.
-pkcs8 = "0.10"
-sec1 = { version = "0.7", default-features = false, features = ["alloc", "der"] }
+pkcs8 = "0.11"
+sec1 = { version = "0.8", default-features = false, features = ["alloc", "der"] }
 
 toolkit-contract = { package = "cf-gears-toolkit-contract", version = "0.4.0", path = "libs/toolkit-contract" }
 toolkit-contract-macros = { package = "cf-gears-toolkit-contract-macros", version = "0.1.6", path = "libs/toolkit-contract-macros" }
@@ -409,6 +427,7 @@ authz-resolver-sdk = { package = "cf-gears-authz-resolver-sdk", version = "0.5.2
 resource-group-sdk = { package = "cf-gears-resource-group-sdk", version = "0.3.5", path = "gears/system/resource-group/resource-group-sdk" }
 oagw-sdk = { package = "cf-gears-oagw-sdk", version = "0.5.15", path = "gears/system/oagw/oagw-sdk" }
 usage-collector-sdk = { package = "cf-gears-usage-collector-sdk", version = "0.3.14", path = "gears/system/usage-collector/usage-collector-sdk" }
+quota-enforcement-engine-most-restrictive = { package = "cf-gears-quota-enforcement-engine-most-restrictive", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-engine-most-restrictive" }
 quota-enforcement-sdk = { package = "cf-gears-quota-enforcement-sdk", version = "0.1.0", path = "gears/system/quota-enforcement/quota-enforcement-sdk" }
 event-broker-sdk = { package = "cf-gears-event-broker-sdk", version = "0.2.6", path = "gears/system/event-broker/event-broker-sdk" }
 sqlite-event-broker-plugin = { package = "cf-gears-sqlite-event-broker-plugin", version = "0.1.0", path = "gears/system/event-broker/plugins/sqlite-event-broker-plugin" }
@@ -454,8 +473,8 @@ bss-money = { package = "cf-gears-bss-money", version = "0.1.0", path = "gears/b
 aws-lc-rs = "1.17"
 
 # settings-service
-settings-service-sdk = { package = "cf-gears-settings-service-sdk", version = "0.1.0", path = "gears/settings-service/settings-service-sdk" }
-settings-service = { package = "cf-gears-settings-service", version = "0.1.4", path = "gears/settings-service/settings-service" }
+settings-service-sdk = { package = "cf-gears-settings-service-sdk", version = "0.2.0", path = "gears/settings-service/settings-service-sdk" }
+settings-service = { package = "cf-gears-settings-service", version = "0.1.7", path = "gears/settings-service/settings-service" }
 
 # credstore
 credstore-sdk = { package = "cf-gears-credstore-sdk", version = "0.2.17", path = "gears/credstore/credstore-sdk" }
@@ -495,7 +514,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 
 # Async runtime
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 # Default features include the `rand`-backed `strategy::jitter` helper used by
@@ -508,6 +527,7 @@ async-stream = { version = "0.3" }
 # High-performance data structures
 dashmap = "6.1"
 arc-swap = "1.7"
+lru = "0.18.2"
 
 # Security
 zeroize = { version = "1", features = ["derive"] }
@@ -559,7 +579,7 @@ utoipa = { version = "5.5", features = [
 ] }
 
 # HTTP stack dependencies
-hyper = "1.10.1"
+hyper = "1.12.0"
 hyper-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = [
     "aws-lc-rs",
@@ -569,13 +589,19 @@ hyper-rustls = { version = "0.27", default-features = false, features = [
     "native-tokio",
     "webpki-tokio",
 ] }
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 http-body-util = "0.1"
 http-body = "1"
+# HTTP/2 (toolkit-http-proxy drives it directly). The floor is a security
+# floor: 0.4.20 rejects conflicting `content-length` values and responses
+# without `:status`; 0.4.17 caps the HPACK encoder table a peer can enlarge
+# via SETTINGS; 0.4.16 fixes RUSTSEC-2026-0258 (empty DATA flood); MadeYouReset
+# (0.4.11) and the CONTINUATION flood (0.4.4) are included.
+h2 = "0.4.20"
 
 # HTTP client (default-tls = rustls + aws-lc-rs in 0.13)
 reqwest = { version = "0.13", features = ["stream"] }
@@ -739,6 +765,10 @@ percent-encoding = "2"
 # Regex for env expansion
 regex = "1.10"
 
+# SemVer parsing and precedence for publisher versions (`types-registry-sdk`).
+# Already in the tree through `rustc_version` / `cargo_metadata`.
+semver = "1.0"
+
 # CLI and terminal output
 glob = "0.3"
 supports-color = "3"
@@ -771,7 +801,7 @@ inventory = "0.3"
 
 # File system utilities
 tempfile = "3"
-dirs = "6"
+dirs = "7"
 
 # Decimal handling
 bigdecimal = "0.4"
@@ -832,6 +862,9 @@ flate2 = "1"
 futures-core = "0.3"
 futures-util = "0.3"
 pin-project-lite = "0.2"
+sync_wrapper = "1.0"
+# Fast seeded hasher for maps keyed by configuration (not attacker input).
+foldhash = "0.2"
 
 # HTTP types and web utilities
 http = "1.3"
@@ -882,17 +915,19 @@ jsonschema = { version = "0.40", default-features = false }
 walkdir = "2.5"
 
 # GTS library — published on crates.io.
-gts-id = "0.12.1"
-gts = "0.12.1"
-gts-macros = "0.12.1"
+gts-id = "0.16.1"
+gts = "0.16.1"
+gts-macros = "0.16.1"
 
 license-resolver-sdk = { package = "cf-gears-license-resolver-sdk", version = "0.1.4", path = "gears/system/license-resolver/license-resolver-sdk" }
 license-resolver = { package = "cf-gears-license-resolver", version = "0.1.5", path = "gears/system/license-resolver/license-resolver" }
 static-license-plugin = { package = "cf-gears-static-license-plugin", version = "0.1.5", path = "gears/system/license-resolver/plugins/static-license-plugin" }
 
-# Admission control
+# Admission control + policy engine
 admission-control-sdk = { package = "cf-gears-admission-control-sdk", version = "0.1.0", path = "gears/system/admission-control/admission-control-sdk" }
 admission-control = { package = "cf-gears-admission-control", version = "0.1.0", path = "gears/system/admission-control/admission-control" }
+policy-engine-sdk = { package = "cf-gears-policy-engine-sdk", version = "0.1.0", path = "gears/system/policy-engine/policy-engine-sdk" }
+policy-engine = { package = "cf-gears-policy-engine", version = "0.1.0", path = "gears/system/policy-engine/policy-engine" }
 # Rego interpreter backing `toolkit-policy-evaluation`. Never enable `mimalloc` /
 # `allocator-memory-limits` (they assign a global allocator), `http`, `uuid`
 # or `opa-runtime`. Pinned exactly: the denylists and structural guards are

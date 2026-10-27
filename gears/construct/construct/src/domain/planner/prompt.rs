@@ -1,8 +1,9 @@
-use construct_sdk::gts::RECORD_TYPES;
+use construct_sdk::gts::record_type_schema;
 use construct_sdk::person_types::Cardinality;
 use serde_json::Value;
 use toolkit_macros::domain_model;
 
+use super::agent::AgentMessage;
 use super::catalog::PropertyCatalog;
 use crate::domain::profile::Category;
 use crate::domain::record_intake::ReceivedRecord;
@@ -73,12 +74,7 @@ pub fn record_input(
     record: &ReceivedRecord,
     numbered_profile: &str,
 ) -> Result<String, UnusableRecord> {
-    let record_type = RECORD_TYPES
-        .iter()
-        .find(|record_type| record_type.type_id == record.envelope.type_id)
-        .ok_or(UnusableRecord::UnknownType)?;
-    let schema: Value =
-        serde_json::from_str(record_type.schema).map_err(|_| UnusableRecord::NoPayloadSchema)?;
+    let schema = record_type_schema(&record.envelope.type_id).ok_or(UnusableRecord::UnknownType)?;
     let payload_schema = schema
         .pointer("/allOf/1/properties/payload")
         .ok_or(UnusableRecord::NoPayloadSchema)?;
@@ -102,6 +98,28 @@ pub fn record_input(
         as_data(&without_ids(payload).to_string()),
         as_data(profile)
     ))
+}
+
+/// What the subject told an agent and the recent conversation, with the numbered profile, as the model gets them,
+/// marked as data. Both texts are JSON strings, so neither can close its block or open another.
+#[must_use]
+pub fn message_input(message: &AgentMessage, numbered_profile: &str) -> String {
+    let profile = if numbered_profile.is_empty() {
+        "(empty)"
+    } else {
+        numbered_profile
+    };
+    let conversation = if message.conversation.trim().is_empty() {
+        "(none)".to_owned()
+    } else {
+        Value::from(message.conversation.as_str()).to_string()
+    };
+    format!(
+        "<message>\nThe person said: {}\nRecent conversation: {}\n</message>\n\n<profile>\n{}\n</profile>",
+        as_data(&Value::from(message.message.as_str()).to_string()),
+        as_data(&conversation),
+        as_data(profile)
+    )
 }
 
 /// `text` with each `<` and `>` written as its JSON escape. Every one of them is inside a JSON string, where the escape

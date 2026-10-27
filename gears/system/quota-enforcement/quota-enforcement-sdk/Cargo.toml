@@ -32,6 +32,9 @@ serde_json = { workspace = true }
 schemars = { workspace = true }
 time = { workspace = true }
 
+# Canonical digests: the idempotency subject key and the request payload hash
+aws-lc-rs = { workspace = true }
+
 # GTS types. `inventory` carries the QE-owned GTS definitions into the
 # process-wide registry seed (`toolkit_gts::InventoryTypeSchema`).
 gts = { workspace = true }
@@ -40,6 +43,8 @@ inventory = { workspace = true }
 
 # `AccessScope` and `SecurityContext` on the plugin contract signatures.
 toolkit-security = { workspace = true }
+# `QuotaEnforcementError` is the platform canonical error (DESIGN section 3.3).
+toolkit-canonical-errors = { workspace = true }
 
 parking_lot = { workspace = true, optional = true }
 

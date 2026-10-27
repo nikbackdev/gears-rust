@@ -6,14 +6,26 @@ use opentelemetry::metrics::MeterProvider;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 
+use std::sync::Arc;
+
 use super::{
     ADMITTED_METRIC_VIOLATIONS_TOTAL, CONTRACT_VALIDATION_FAILURES_TOTAL, DENIAL_TOTAL,
     QeMetricsMeter, build_default_adapter,
 };
 use crate::config::MetricsConfig;
+use crate::domain::ports::lifecycle_gauges::{LifecycleCounts, LifecycleGaugeSink};
 use crate::domain::ports::metrics::{
-    DenialReason, QeMetrics, REASON_LABEL, SURFACE_LABEL, ValidationReason, ValidationSurface,
+    DenialReason, OperationKind, QeMetrics, REASON_LABEL, RetentionTable, SURFACE_LABEL,
+    ValidationReason, ValidationSurface,
 };
+use crate::infra::lifecycle_gauges::{
+    LifecycleGaugeCell, QUOTA_CAP_UNBOUNDED_TOTAL, QUOTA_CAP_ZERO_TOTAL,
+    QUOTA_FOR_DIRECT_METRIC_TOTAL,
+};
+
+fn cell() -> Arc<LifecycleGaugeCell> {
+    Arc::new(LifecycleGaugeCell::default())
+}
 
 fn local_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
     let exporter = InMemoryMetricExporter::default();
@@ -63,6 +75,7 @@ fn denial_total_is_rendered_under_the_catalogue_name_with_the_reason_label() {
     let meter = QeMetricsMeter::new(
         &provider.meter("quota-enforcement"),
         &MetricsConfig::default(),
+        cell(),
     );
 
     meter.record_denial(DenialReason::PermissionDenied);
@@ -100,7 +113,7 @@ fn a_configured_prefix_namespaces_the_instrument() {
     let config = MetricsConfig {
         prefix: "qe".to_owned(),
     };
-    let meter = QeMetricsMeter::new(&provider.meter("quota-enforcement"), &config);
+    let meter = QeMetricsMeter::new(&provider.meter("quota-enforcement"), &config, cell());
     meter.record_denial(DenialReason::InvalidArgument);
     provider.force_flush().expect("flush");
     assert_eq!(counter_sum(&exporter, "qe_denial_total", None), Some(1));
@@ -117,6 +130,7 @@ fn contract_validation_counters_render_with_their_closed_labels() {
     let meter = QeMetricsMeter::new(
         &provider.meter("quota-enforcement"),
         &MetricsConfig::default(),
+        cell(),
     );
 
     meter.record_contract_validation_failure(
@@ -200,10 +214,193 @@ fn every_reason_label_is_a_distinct_snake_case_token() {
     );
     let reasons: Vec<&str> = ValidationReason::ALL.iter().map(|r| r.as_label()).collect();
     assert_distinct_snake_case(&reasons);
+    // The hot path's two label sets are closed for the same reason: a denial
+    // reason authored in a CEL policy, or an operation kind, must never widen
+    // the cardinality of an instrument.
+    let operations: Vec<&str> = OperationKind::ALL.iter().map(|o| o.as_label()).collect();
+    assert_distinct_snake_case(&operations);
+    assert_eq!(operations, ["debit", "credit", "rollback", "preview"]);
+    let tables: Vec<&str> = RetentionTable::ALL.iter().map(|t| t.as_str()).collect();
+    assert_distinct_snake_case(&tables);
+    assert_eq!(tables, ["idempotency", "operation_log"]);
+    assert_eq!(
+        DenialReason::from_decision_reason("SOMETHING_A_POLICY_AUTHORED").as_label(),
+        "engine_denied",
+        "an engine-authored reason collapses instead of opening the label set"
+    );
 }
 
 #[test]
 fn the_default_adapter_builds_on_the_global_provider_without_panicking() {
-    let adapter = build_default_adapter(&MetricsConfig::default());
+    let adapter = build_default_adapter(&MetricsConfig::default(), cell());
     adapter.record_denial(DenialReason::NotReady);
+}
+
+/// Last value of the `u64` gauge named `name` in the most recent export, if
+/// it carries a data point.
+fn gauge_last_u64(exporter: &InMemoryMetricExporter, name: &str) -> Option<u64> {
+    let metrics = exporter.get_finished_metrics().expect("finished metrics");
+    let mut last = None;
+    for rm in &metrics {
+        for sm in rm.scope_metrics() {
+            for metric in sm.metrics() {
+                if metric.name() == name
+                    && let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data()
+                {
+                    last = gauge
+                        .data_points()
+                        .next()
+                        .map(opentelemetry_sdk::metrics::data::GaugeDataPoint::value);
+                }
+            }
+        }
+    }
+    last
+}
+
+#[test]
+fn lifecycle_gauges_observe_the_published_sample_and_nothing_when_withdrawn() {
+    let (provider, exporter) = local_provider();
+    let cell = cell();
+    let _meter = QeMetricsMeter::new(
+        &provider.meter("quota-enforcement"),
+        &MetricsConfig::default(),
+        cell.clone(),
+    );
+
+    provider.force_flush().expect("flush");
+    assert_eq!(
+        gauge_last_u64(&exporter, QUOTA_CAP_ZERO_TOTAL),
+        None,
+        "no sample, no data point"
+    );
+
+    cell.publish(Some(LifecycleCounts {
+        cap_zero: 2,
+        cap_unbounded: 5,
+        for_direct_metric: 1,
+    }));
+    provider.force_flush().expect("flush");
+    assert_eq!(gauge_last_u64(&exporter, QUOTA_CAP_ZERO_TOTAL), Some(2));
+    assert_eq!(
+        gauge_last_u64(&exporter, QUOTA_CAP_UNBOUNDED_TOTAL),
+        Some(5)
+    );
+    assert_eq!(
+        gauge_last_u64(&exporter, QUOTA_FOR_DIRECT_METRIC_TOTAL),
+        Some(1)
+    );
+
+    cell.publish(None);
+    exporter.reset();
+    provider.force_flush().expect("flush");
+    assert_eq!(
+        gauge_last_u64(&exporter, QUOTA_CAP_ZERO_TOTAL),
+        None,
+        "a withdrawn sample is absent, never zero"
+    );
+}
+
+#[test]
+fn lifecycle_gauges_honour_the_configured_prefix() {
+    let (provider, exporter) = local_provider();
+    let cell = cell();
+    let config = MetricsConfig {
+        prefix: "qe".to_owned(),
+    };
+    let _meter = QeMetricsMeter::new(&provider.meter("quota-enforcement"), &config, cell.clone());
+    cell.publish(Some(LifecycleCounts {
+        cap_zero: 1,
+        cap_unbounded: 0,
+        for_direct_metric: 0,
+    }));
+    provider.force_flush().expect("flush");
+    assert_eq!(
+        gauge_last_u64(&exporter, "qe_quota_cap_zero_total"),
+        Some(1)
+    );
+    assert_eq!(gauge_last_u64(&exporter, QUOTA_CAP_ZERO_TOTAL), None);
+}
+
+#[test]
+fn policy_engine_instruments_use_only_documented_labels() {
+    use crate::domain::ports::metrics::{EngineLabel, PolicyTransition};
+    use quota_enforcement_sdk::engine::DebitPlanInvariant;
+    let (provider, exporter) = local_provider();
+    let adapter = QeMetricsMeter::new(
+        &provider.meter("qe-policy-test"),
+        &MetricsConfig::default(),
+        cell(),
+    );
+    adapter.record_engine_bootstrap_failure(EngineLabel::from_linked_id("cel"));
+    adapter.record_engine_evaluation(
+        EngineLabel::from_linked_id("cel"),
+        std::time::Duration::from_millis(1),
+    );
+    adapter.record_plan_violation(
+        EngineLabel::from_linked_id("cel"),
+        DebitPlanInvariant::AmountExceedsRequestAmount,
+    );
+    adapter.record_policy_transition(PolicyTransition::Rollback);
+    adapter.record_policy_conflict();
+    provider.force_flush().expect("flush");
+    assert_eq!(
+        counter_sum(
+            &exporter,
+            "engine_bootstrap_failures_total",
+            Some(("engine_id", "cel"))
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        counter_sum(
+            &exporter,
+            "policy_version_transitions_total",
+            Some(("transition_kind", "rollback"))
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        counter_sum(&exporter, "policy_version_conflict_rejections_total", None),
+        Some(1)
+    );
+    for resource in exporter.get_finished_metrics().expect("metrics") {
+        for scope in resource.scope_metrics() {
+            for metric in scope.metrics() {
+                let expected: &[&str] = match metric.name() {
+                    "engine_bootstrap_failures_total" | "engine_evaluation_seconds" => {
+                        &["engine_id"]
+                    }
+                    "debit_plan_invariant_violations_total" => &["engine_id", "invariant"],
+                    "policy_version_transitions_total" => &["transition_kind"],
+                    "policy_version_conflict_rejections_total" => &[],
+                    _ => continue,
+                };
+                match metric.data() {
+                    AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                        for point in sum.data_points() {
+                            let mut keys: Vec<_> = point
+                                .attributes()
+                                .map(|attribute| attribute.key.as_str())
+                                .collect();
+                            keys.sort_unstable();
+                            assert_eq!(keys, expected);
+                        }
+                    }
+                    AggregatedMetrics::F64(MetricData::Histogram(histogram)) => {
+                        for point in histogram.data_points() {
+                            assert_eq!(
+                                point
+                                    .attributes()
+                                    .map(|attribute| attribute.key.as_str())
+                                    .collect::<Vec<_>>(),
+                                expected
+                            );
+                        }
+                    }
+                    _ => panic!("unexpected policy instrument type"),
+                }
+            }
+        }
+    }
 }
