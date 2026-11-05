@@ -337,7 +337,11 @@ pub fn assemble(
             subject_control,
             review_queue,
             admin_facts,
-            manage: Arc::new(ManageFacts::not_configured(contexts, policy_enforcer)),
+            manage: Arc::new(ManageFacts::not_configured(
+                contexts,
+                policy_enforcer,
+                MANAGE_BUDGET,
+            )),
         });
     };
     let (hand_off, queue) = record_queue(cfg.config().processing.queue_capacity);
