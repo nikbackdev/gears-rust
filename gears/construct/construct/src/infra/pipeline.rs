@@ -24,7 +24,7 @@ use crate::domain::model_client::ModelClient;
 use crate::domain::one_step::OneStepPath;
 use crate::domain::planner::agent::{Planner, PlannerCaps};
 use crate::domain::planner::catalog::PropertyCatalog;
-use crate::domain::planner::manage::ManageFacts;
+use crate::domain::planner::manage::{ManageBudget, ManageFacts};
 use crate::domain::planner::processing::{
     PlanWriter, Processing, ProcessingContexts, ProcessingPorts,
 };
@@ -159,9 +159,12 @@ pub struct Pipeline {
     pub manage: Arc<ManageFacts>,
 }
 
-/// How long manage-facts may take before its write: inside the API gateway's 30-second request timeout, leaving the
-/// rest to the write, which is awaited once it started.
-const MANAGE_BUDGET: Duration = Duration::from_secs(20);
+/// How long manage-facts may take: 20 seconds for the steps before the write, and 27 for the whole call, the write
+/// included, inside the API gateway's 30-second request timeout.
+const MANAGE_BUDGET: ManageBudget = ManageBudget {
+    before_write: Duration::from_secs(20),
+    answer: Duration::from_secs(27),
+};
 
 /// Build the pipeline from the config.
 ///

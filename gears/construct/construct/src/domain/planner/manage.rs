@@ -9,7 +9,7 @@ use toolkit_security::{SecurityContext, pep_properties};
 use uuid::Uuid;
 
 use super::agent::AgentMessage;
-use super::processing::{Managed, NothingStored, Processing};
+use super::processing::{ManageDeadlines, Managed, NothingStored, Processing};
 use crate::domain::error::DomainError;
 
 pub(crate) const SUBJECT_FACTS_RESOURCE: ResourceType = ResourceType::from_static(
@@ -21,22 +21,44 @@ pub(crate) mod actions {
     pub const MANAGE: &str = "manage";
 }
 
+/// How long a manage-facts call may take from its start: the steps before the write, and the whole call, the write
+/// included.
+#[domain_model]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManageBudget {
+    /// The profile read, the agent loop, the checks and Admission.
+    pub before_write: Duration,
+    /// The whole call, the write included.
+    pub answer: Duration,
+}
+
+impl ManageBudget {
+    /// The deadlines of a call that started at `start`.
+    #[must_use]
+    pub fn deadlines_from(self, start: Instant) -> ManageDeadlines {
+        ManageDeadlines {
+            before_write: start + self.before_write,
+            answer: start + self.answer,
+        }
+    }
+}
+
 /// The synchronous manage-facts operation: what a subject told an agent, decided and stored while the caller waits.
 #[domain_model]
 pub struct ManageFacts {
     /// The chain record processing runs; none when the deployment does not configure processing.
     processing: Option<Arc<Processing>>,
     policy_enforcer: PolicyEnforcer,
-    budget: Duration,
+    budget: ManageBudget,
 }
 
 impl ManageFacts {
-    /// `budget` bounds the steps before the write, so the answer fits the gateway's request timeout.
+    /// `budget` bounds the call, so the answer fits the gateway's request timeout.
     #[must_use]
     pub fn new(
         processing: Arc<Processing>,
         policy_enforcer: PolicyEnforcer,
-        budget: Duration,
+        budget: ManageBudget,
     ) -> Self {
         Self {
             processing: Some(processing),
@@ -52,7 +74,10 @@ impl ManageFacts {
         Self {
             processing: None,
             policy_enforcer,
-            budget: Duration::ZERO,
+            budget: ManageBudget {
+                before_write: Duration::ZERO,
+                answer: Duration::ZERO,
+            },
         }
     }
 
@@ -73,7 +98,7 @@ impl ManageFacts {
         message: String,
         conversation: String,
     ) -> Result<Managed, DomainError> {
-        let deadline = Instant::now() + self.budget;
+        let deadlines = self.budget.deadlines_from(Instant::now());
         if ctx.subject_id() != subject_id {
             return Err(DomainError::forbidden(format!(
                 "subject {} may not manage the facts of subject {subject_id} (tenant {})",
@@ -107,6 +132,6 @@ impl ManageFacts {
             message,
             conversation,
         };
-        processing.manage(ctx, &scope, &message, deadline).await
+        processing.manage(ctx, &scope, &message, deadlines).await
     }
 }

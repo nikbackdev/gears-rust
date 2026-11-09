@@ -6,22 +6,28 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
 use axum::{Extension, Router};
 use serde_json::{Value, json};
+use tokio::time::Instant;
 use toolkit::api::OpenApiRegistryImpl;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-use super::manage::ManageFacts;
+use super::manage::{ManageBudget, ManageFacts};
 use super::processing::Written;
 use super::test_data::{Chain, Profiles, SUBJECT, TENANT, adding_rust};
 use crate::api::rest::dto::{CONVERSATION_LIMIT, MESSAGE_LIMIT};
 use crate::api::rest::routes::register_manage_route;
 use crate::test_support::{AllowResolver, DenyResolver, context_of};
 
+const BUDGET: ManageBudget = ManageBudget {
+    before_write: Duration::from_secs(20),
+    answer: Duration::from_secs(27),
+};
+
 fn router(chain: &Chain, resolver: Arc<dyn AuthZResolverApi>, caller: Uuid) -> Router {
     let manage = ManageFacts::new(
         Arc::new(chain.processing()),
         PolicyEnforcer::new(resolver),
-        Duration::from_secs(20),
+        BUDGET,
     );
     register_manage_route(Router::new(), &OpenApiRegistryImpl::new(), Arc::new(manage))
         .layer(Extension(context_of(caller, TENANT)))
@@ -63,6 +69,25 @@ async fn the_subject_gets_what_was_stored() {
         json!({ "outcome": "stored", "reason": null, "added": 1, "replaced": 0, "removed": 0 })
     );
     assert_eq!(chain.writer.plans().len(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_write_ends_by_the_budget_of_the_whole_call() {
+    let chain = Chain::new(adding_rust(1), &[Ok(Written::Stored)]);
+    let started = Instant::now();
+
+    let (status, _) = post(
+        router(&chain, Arc::new(AllowResolver), SUBJECT),
+        SUBJECT,
+        &said("I also know Rust."),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        chain.writer.deadlines(),
+        vec![started + Duration::from_secs(27)]
+    );
 }
 
 #[tokio::test]
