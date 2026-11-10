@@ -257,7 +257,8 @@ deployment configuration.
 2. [ ] - `p1` - A deadline bounds the steps before the write: the profile read, the agent loop, the checks and
    Admission. Past it, nothing is stored and the answer is `timeout`. A later deadline bounds the write, which starts
    no call to graph storage and no resend past it; a write it cuts after the plan was sent answers unavailable with
-   its result unknown, never that nothing was stored - `inst-manage-deadline`
+   its result unknown, never that nothing was stored. The `503` of a result unknown says in its detail that the write
+   may have been stored - `inst-manage-deadline`
 3. [ ] - `p1` - A write conflict plans again on a new read while time is left, up to the rerun limit, then answers
    `rerun_limit` - `inst-manage-rerun`
 4. [ ] - `p1` - A stored plan answers what it changed, counted by its steps: added, replaced and removed. The writer
@@ -444,7 +445,9 @@ The system **MUST** offer `POST /api/construct/v1/subjects/{subject_id}/facts/ma
 for the subject: another subject, no "manage facts" permission from the AuthZ resolver, or a policy scope that leaves
 the subject's settings out. It **MUST** answer `400`
 naming the field, without a model call, for a `message` longer than 4 000 characters or a `conversation` longer than
-16 000. A blank message stores nothing without a model call. A failed dependency answers `503`. The agent in the plan's origin is the caller the
+16 000. A blank message stores nothing without a model call. A failed dependency answers `503`, which stored nothing, so the call can be sent again; a write whose result is
+unknown answers `503` with a detail that says it may have been stored, so the agent reads the profile before it
+sends the call again. The agent in the plan's origin is the caller the
 platform authenticated. The steps before the write have 20 seconds and the whole call, the write included, 27: inside
 the gateway's 30-second request timeout. The gear
 registers the route on the record worker's processing chain (`cpt-cf-construct-algo-profile-reader-wire`); a deployment
@@ -462,8 +465,11 @@ without record processing answers `501`.
 `a_text_past_its_limit_is_refused_before_a_model_call`,
 `a_blank_message_stores_nothing_without_a_model_call`, `a_call_with_personalization_off_says_so`,
 `an_unreachable_profile_answers_unavailable`, `the_write_ends_by_the_budget_of_the_whole_call`,
-`the_gear_routes_manage_facts_to_the_processing_chain` and
-`without_processing_the_gear_answers_manage_facts_not_configured`.
+`manage_facts_gets_the_manage_budget`,
+`a_write_with_an_unknown_result_maps_to_503_that_says_it_may_have_been_stored`,
+`the_gear_routes_manage_facts_to_the_processing_chain`,
+`without_processing_the_gear_answers_manage_facts_not_configured` and
+`without_processing_a_caller_who_may_not_act_for_the_subject_gets_not_found`.
 
 ### Reference Evaluation Set
 

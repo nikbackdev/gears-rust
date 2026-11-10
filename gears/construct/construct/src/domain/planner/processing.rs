@@ -75,8 +75,9 @@ pub trait PlanWriter: Send + Sync {
     ///
     /// # Errors
     ///
-    /// When the write cannot run. [`DomainError::Unavailable`] when `deadline` passes: nothing was written when it
-    /// passed before the plan was sent, and the result is unknown when it passed after.
+    /// When the write cannot run. [`DomainError::Unavailable`] when `deadline` passed before the plan was sent:
+    /// nothing was written. [`DomainError::WriteUnknown`] when the plan was sent and its result is unknown, also when
+    /// `deadline` passed after the send.
     async fn write_by(
         &self,
         ctx: &SecurityContext,
@@ -198,7 +199,7 @@ impl Changes {
 pub enum NothingStored {
     /// The message held nothing to store, or every value it held was blocked.
     NoChange,
-    /// The deadline of the steps before the write passed, and nothing was sent to the writer.
+    /// The deadline of the steps before the write passed, and nothing is stored.
     Timeout,
     /// Every step touched a fact under an open review request.
     UnderReview,

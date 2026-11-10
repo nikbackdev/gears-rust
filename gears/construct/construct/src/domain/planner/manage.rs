@@ -49,7 +49,8 @@ pub struct ManageFacts {
     /// The chain record processing runs; none when the deployment does not configure processing.
     processing: Option<Arc<Processing>>,
     policy_enforcer: PolicyEnforcer,
-    budget: ManageBudget,
+    /// How long a call may take.
+    pub(crate) budget: ManageBudget,
 }
 
 impl ManageFacts {

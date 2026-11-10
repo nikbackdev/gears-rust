@@ -29,7 +29,7 @@ use crate::domain::planner::processing::{
     PlanWriter, Processing, ProcessingContexts, ProcessingPorts,
 };
 use crate::domain::profile_read::{CategoryCheck, ProfileReadPorts, ProfileReadService};
-use crate::domain::profile_writes::ProfileWrites;
+use crate::domain::profile_writes::{ProfileWrites, WRITE_BUDGET};
 use crate::domain::record_intake::{
     DropEvent, DropReason, DropStage, IntakeEvents, RecordHandOff, RecordKey,
 };
@@ -159,10 +159,10 @@ pub struct Pipeline {
     pub manage: Arc<ManageFacts>,
 }
 
-/// How long manage-facts may take: 20 seconds for the steps before the write, and 27 for the whole call, the write
-/// included, inside the API gateway's 30-second request timeout.
-const MANAGE_BUDGET: ManageBudget = ManageBudget {
-    before_write: Duration::from_secs(20),
+/// How long manage-facts may take: [`WRITE_BUDGET`] for the steps before the write, as the other write paths have,
+/// and 27 seconds for the whole call, the write included, inside the API gateway's 30-second request timeout.
+pub(crate) const MANAGE_BUDGET: ManageBudget = ManageBudget {
+    before_write: WRITE_BUDGET,
     answer: Duration::from_secs(27),
 };
 

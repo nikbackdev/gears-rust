@@ -194,16 +194,13 @@ impl GraphPlanWriter {
             }
             Ok(())
         };
-        let finished = timeout_at(deadline.min(Instant::now() + self.timeout), cleanup).await;
+        let call_end = Instant::now() + self.timeout;
+        let finished = timeout_at(deadline.min(call_end), cleanup).await;
         let left = keys.len() - done.load(Ordering::Relaxed);
         match finished {
             Ok(Ok(())) => {}
             Ok(Err((key, err))) => unfinished(key, &err, left),
-            Err(_) => tracing::warn!(
-                left,
-                timeout = ?self.timeout,
-                "removed facts stay listed on the root until a later write finishes them"
-            ),
+            Err(_) => cut_short(left, deadline <= call_end, self.timeout),
         }
     }
 
@@ -238,7 +235,7 @@ impl GraphPlanWriter {
                 return Err(if attempt == 1 {
                     out_of_time()
                 } else {
-                    DomainError::Unavailable(format!(
+                    DomainError::WriteUnknown(format!(
                         "graph storage profile write: result unknown after {} sends: out of time",
                         attempt - 1
                     ))
@@ -248,10 +245,15 @@ impl GraphPlanWriter {
             let sent = timeout_at(cut, self.ports.client.ingest(ctx, request.clone())).await;
             let failed = match classify(sent, cut - started) {
                 Sent::Stored => return Ok(Written::Stored),
+                Sent::Failed(DomainError::Unavailable(failed)) if unknown => {
+                    return Err(DomainError::WriteUnknown(format!(
+                        "graph storage profile write: result unknown after {attempt} sends: {failed}"
+                    )));
+                }
                 Sent::Failed(err) => return Err(err),
                 Sent::Refused if unknown && !replayed => {
                     if attempt >= self.attempts.get() {
-                        return Err(DomainError::Unavailable(format!(
+                        return Err(DomainError::WriteUnknown(format!(
                             "graph storage profile write: result unknown after {attempt} \
                              sends: refused after a send without an answer"
                         )));
@@ -270,14 +272,14 @@ impl GraphPlanWriter {
             };
             unknown = true;
             if attempt >= self.attempts.get() {
-                return Err(DomainError::Unavailable(format!(
+                return Err(DomainError::WriteUnknown(format!(
                     "graph storage profile write: result unknown after {attempt} sends: {failed}"
                 )));
             }
             let pause = pauses.next().unwrap_or(Duration::MAX);
             let pause = pause.saturating_add(jitter(pause));
             if Instant::now() + pause >= deadline {
-                return Err(DomainError::Unavailable(format!(
+                return Err(DomainError::WriteUnknown(format!(
                     "graph storage profile write: result unknown after {attempt} sends: {failed}; \
                      no time is left to send it again"
                 )));
@@ -314,6 +316,25 @@ async fn by<T>(
     timeout_at(deadline, call)
         .await
         .unwrap_or_else(|_| Err(out_of_time()))
+}
+
+/// Log a cleanup cut by the write's deadline (`by_deadline`) or by the call
+/// `timeout`, with `left` removals not done.
+fn cut_short(left: usize, by_deadline: bool, timeout: Duration) {
+    if by_deadline {
+        tracing::warn!(
+            left,
+            "removed facts stay listed on the root until a later write finishes them: \
+             the cleanup ran out of the write's deadline"
+        );
+    } else {
+        tracing::warn!(
+            left,
+            timeout = ?timeout,
+            "removed facts stay listed on the root until a later write finishes them: \
+             the cleanup ran out of the call timeout"
+        );
+    }
 }
 
 /// Log a cleanup that stopped at `key`, with `left` removals not done.

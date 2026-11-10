@@ -340,4 +340,31 @@ async fn without_processing_the_gear_answers_manage_facts_not_configured() {
     .await;
 
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    assert_eq!(body["status"], 501, "{body}");
+    assert!(
+        body["type"]
+            .as_str()
+            .is_some_and(|kind| kind.contains("unimplemented")),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn without_processing_a_caller_who_may_not_act_for_the_subject_gets_not_found() {
+    let (caller, subject) = (Uuid::new_v4(), Uuid::new_v4());
+
+    let (status, body) = manage(
+        router_of(ConstructConfig::default(), None, caller).await,
+        subject,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["status"], 404, "{body}");
+    assert!(
+        body["type"]
+            .as_str()
+            .is_some_and(|kind| kind.contains("not_found")),
+        "{body}"
+    );
 }
